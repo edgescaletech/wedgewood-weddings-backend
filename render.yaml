@@ -1,0 +1,19 @@
+# Render deployment configuration
+# https://render.com/docs/render-yaml-reference
+
+services:
+  - type: web
+    name: wedgewood-backend
+    runtime: go
+    rootDir: backend
+    buildCommand: go build -o server ./cmd/server/
+    startCommand: ./server
+    envVars:
+      - key: SF_MY_DOMAIN_URL
+        sync: false        # set manually in Render dashboard
+      - key: SF_CLIENT_ID
+        sync: false
+      - key: SF_CLIENT_SECRET
+        sync: false
+    healthCheckPath: /healthz
+    autoDeploy: true

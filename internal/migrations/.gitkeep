@@ -1,0 +1,4 @@
+# This folder holds SQL migration files.
+# Naming convention: 001_create_events_cache.sql, 002_add_venues.sql, etc.
+# Tool: golang-migrate (https://github.com/golang-migrate/migrate)
+# Run: migrate -path ./migrations -database $DATABASE_URL up

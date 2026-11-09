@@ -1,0 +1,24 @@
+# Environment & secrets — never commit local environment files
+.env
+.env.*
+!.env.example
+*.env
+
+# Logs and local data
+*.log
+coverage.out
+coverage.html
+
+# Go build outputs
+/server
+/pubsub
+*.exe
+*.test
+*.out
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
