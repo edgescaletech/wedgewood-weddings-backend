@@ -305,6 +305,7 @@ func main() {
 	mux.HandleFunc("/healthz", healthzHandler)
 	mux.Handle("/api/events", authServer.Middleware(eventsHandler(sf, cache)))
 	mux.HandleFunc("/auth/login", authServer.Login)
+	mux.HandleFunc("/auth/password", authServer.PasswordLogin)
 	mux.HandleFunc("/auth/callback", authServer.Callback)
 	mux.HandleFunc("/auth/logout", authServer.Logout)
 	mux.Handle("/auth/me", authServer.Middleware(http.HandlerFunc(authServer.Me)))

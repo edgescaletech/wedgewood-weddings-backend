@@ -58,3 +58,11 @@ func (p workOS) Revoke(ctx context.Context, sessionID string) error {
 		},
 	)
 }
+
+// Password checks credentials with WorkOS without storing the password locally.
+func (p workOS) Password(ctx context.Context, email, password string) (*workos.AuthenticateResponse, error) {
+	return p.c.UserManagement().AuthenticateWithPassword(
+		ctx,
+		&workos.UserManagementAuthenticateWithPasswordParams{Email: email, Password: password},
+	)
+}

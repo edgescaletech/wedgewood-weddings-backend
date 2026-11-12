@@ -79,11 +79,11 @@ func (server *Server) Callback(writer http.ResponseWriter, request *http.Request
 		return
 	}
 
-	server.createSession(writer, request, response)
+	server.createSession(writer, request, response, false)
 }
 
 // createSession verifies the WorkOS response and stores the linked local session.
-func (server *Server) createSession(writer http.ResponseWriter, request *http.Request, response *workos.AuthenticateResponse) {
+func (server *Server) createSession(writer http.ResponseWriter, request *http.Request, response *workos.AuthenticateResponse, jsonResponse bool) {
 	// Trust the WorkOS user only after verifying the token and matching its subject.
 	c, err := server.verify(request.Context(), response.AccessToken)
 	if err != nil || c.Subject != response.User.ID || response.User.Email == "" || response.RefreshToken == "" {
@@ -149,5 +149,9 @@ func (server *Server) createSession(writer http.ResponseWriter, request *http.Re
 
 	// Give the browser the opaque session ID and return it to the application.
 	server.cookie(writer, "session", sessionID, 86400)
+	if jsonResponse {
+		writer.WriteHeader(http.StatusNoContent)
+		return
+	}
 	http.Redirect(writer, request, server.config.AppURL, http.StatusSeeOther)
 }

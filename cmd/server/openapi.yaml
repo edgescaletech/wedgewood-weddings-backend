@@ -9,6 +9,27 @@ paths:
       summary: Health check
       responses:
         '200': {description: Healthy}
+  /auth/password:
+    post:
+      summary: Sign in with email and password
+      description: Requires an Origin matching APP_URL. WorkOS verifies credentials; additional verification challenges are not yet supported.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: {type: string, format: email}
+                password: {type: string, format: password}
+      responses:
+        '204': {description: Session cookie created}
+        '400': {description: Invalid request}
+        '401': {description: Sign-in failed or requires additional verification}
+        '403': {description: Invalid origin}
+        '429': {description: Too many attempts}
+        '503': {description: Authentication unavailable}
   /auth/login:
     get:
       summary: Begin hosted AuthKit sign-in
