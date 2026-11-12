@@ -7,71 +7,14 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"wedding-project/internal/models"
 )
 
-// QuoteDetails holds rich catering, bar, and rental details from CPQ Quote and Quote Lines.
-type QuoteDetails struct {
-	QuoteID               string   `json:"quoteId,omitempty"`
-	QuoteNumber           string   `json:"quoteNumber,omitempty"`
-	IsPrimary             bool     `json:"isPrimary"`
-	MealService           string   `json:"mealService,omitempty"`           // e.g. "Buffet Service" or "Plated Service"
-	MealPackage           string   `json:"mealPackage,omitempty"`           // e.g. "Three Entree Buffet" (POS: Banquet Food)
-	MealPackageQty        float64  `json:"mealPackageQty,omitempty"`        // Meal package covers
-	BarPackage            string   `json:"barPackage,omitempty"`            // Primary bar package
-	HostedBarType         string   `json:"hostedBarType,omitempty"`         // POS: Hosted Bar (Prints=false)
-	HostedBarHours        float64  `json:"hostedBarHours,omitempty"`        // # of Hosted Bar Hours
-	NoHostBar             string   `json:"noHostBar,omitempty"`             // POS: No Host Bar
-	Champagne             string   `json:"champagne,omitempty"`             // Champagne / toast product
-	ChampagneQty          float64  `json:"champagneQty,omitempty"`          // Champagne quantity
-	Wine                  string   `json:"wine,omitempty"`                  // Hosted wine product
-	WineQty               float64  `json:"wineQty,omitempty"`               // Wine quantity
-	WineGlassesNeeded     bool     `json:"wineGlassesNeeded"`               // Inferred table settings
-	ChampagneFlutesNeeded bool     `json:"champagneFlutesNeeded"`           // Inferred table settings
-	LateNightSnacks       []string `json:"lateNightSnacks,omitempty"`       // Service_Offerings__c: Munchies
-	LoveLetters           string   `json:"loveLetters,omitempty"`           // Love Letters
-	LoveLettersQty        float64  `json:"loveLettersQty,omitempty"`        // Love Letters quantity
-	BarItems              []string `json:"barItems,omitempty"`              // Champagne toast, wine with dinner, etc.
-	Appetizers            []string `json:"appetizers,omitempty"`            // Chicken & Waffles, Mini Crab Cakes, etc.
-	Entrees               []string `json:"entrees,omitempty"`               // Panko Parmesan Chicken, Carved Roast Beef, etc.
-	SidesSalads           []string `json:"sidesSalads,omitempty"`           // Garlic Mashed Potatoes, Seasonal Vegetables, etc.
-	Dessert               string   `json:"dessert,omitempty"`               // Personalized Wedding Cake
-	Linens                []string `json:"linens,omitempty"`                // e.g. ["Linen, Elite Full Length", "Linen, House"]
-	Napkins               string   `json:"napkins,omitempty"`               // e.g. "Napkins, House"
-	Chairs                string   `json:"chairs,omitempty"`                // e.g. "Chairs, Elite"
-	DecorRentals          []string `json:"decorRentals,omitempty"`          // Floral Centerpieces, Charger Plates, Lawn Games, etc.
-}
+// Re-export model types so existing callers remain 100% compatible.
+type QuoteDetails = models.QuoteDetails
+type Event = models.Event
 
-// Event maps the Salesforce Opportunity fields we display in the UI.
-type Event struct {
-	ID                string        `json:"id"`
-	Name              string        `json:"name"`
-	EventDate         string        `json:"eventDate"`        // YYYY-MM-DD
-	DayOfWeek         string        `json:"dayOfWeek"`        // Friday, Saturday, etc.
-	StartTime         string        `json:"startTime"`        // e.g. 4:00 PM
-	EndTime           string        `json:"endTime"`          // e.g. 11:00 PM
-	EventType         string        `json:"eventType"`        // Wedding, Reception, etc.
-	GuestCount        int           `json:"guestCount"`       // numeric covers
-	Venue             string        `json:"venue"`            // Main venue/property name
-	VenueID           string        `json:"venueId,omitempty"`// Venue Account ID
-	VenueProperty     string        `json:"venueProperty"`    // Property/estate name
-	VenueGM           string        `json:"venueGM,omitempty"`// Venue General Manager
-	CeremonyLocation  string        `json:"ceremonyLocation"` // Sub-place: e.g. Lakeside Arbor
-	PhotoBooth        bool          `json:"photoBooth"`       // photo booth available
-	PhotoboothStaffed bool          `json:"photoboothStaffed"`// Venue-staffed photo booth
-	HasBar            bool          `json:"hasBar"`           // bar service
-	BarLocation       string        `json:"barLocation"`      // Sub-place: e.g. Terrace Cocktail Patio
-	SignatureDrinks   string        `json:"signatureDrinks,omitempty"` // Specialty Drinks from Planning Details
-	ChargerPlates     string        `json:"chargerPlates,omitempty"`   // Charger plates from Planning Details
-	Notes             string        `json:"notes"`            // notes & special requests
-	StageName         string        `json:"stageName"`        // stage
-	Package           string        `json:"package"`          // Package tier (Elite, Premier, etc.)
-	Coordinator       string        `json:"coordinator"`      // Day-of coordinator name
-	DJName            string        `json:"djName"`           // DJ Name
-	DecorSetupTime    string        `json:"decorSetupTime"`   // Decor setup time
-	BEONotes          string        `json:"beoNotes"`         // Staff Facing BEO Notes
-	ContractSigned    bool          `json:"contractSigned"`   // Contract signed status
-	Quote             *QuoteDetails `json:"quote,omitempty"`  // Level 2 & 3: CPQ Quote & QuoteLine details
-}
 
 // nameRelation captures relationship traversal (e.g. Venue__r.Name, Venue_GM__r.Name).
 type nameRelation struct {
@@ -80,8 +23,23 @@ type nameRelation struct {
 
 // planningDetailsRelation captures Primary_Planning_Details__r fields.
 type planningDetailsRelation struct {
-	SpecialtyDrinks string `json:"Specialty_Drinks__c"`
-	Chargers        string `json:"Chargers__c"`
+	SpecialtyDrinks           string `json:"Specialty_Drinks__c"`
+	Chargers                  string `json:"Chargers__c"`
+	CeremonyStartTime         string `json:"Ceremony_Start_Time__c"`
+	CeremonyStartDateTime     string `json:"Ceremony_Start_DateTime__c"`
+	MealServiceTime           string `json:"Meal_Service_Time__c"`
+	MealServiceDateTime       string `json:"Meal_Service_DateTime__c"`
+	CocktailHourStartTime     string `json:"Cocktail_Hour_Start_Time__c"`
+	CocktailHourStartDateTime string `json:"Cocktail_Hour_Start_DateTime__c"`
+	BarStartTime              string `json:"Bar_Start_Time__c"`
+	BarStartDateTime          string `json:"Bar_Start_Date_Time__c"`
+	BarCloseTime              string `json:"Bar_Close_Time__c"`
+	BarCloseDateTime          string `json:"Bar_Close_DateTime__c"`
+	BarLastCallTime           string `json:"Bar_Last_Call_Time__c"`
+	BarLastCallDateTime       string `json:"Bar_Last_Call_DateTime__c"`
+	AnticipatedBarActivity    string `json:"Anticipated_Bar_Activity__c"`
+	OtherBarNotes             string `json:"Other_Bar_Notes__c"`
+	BeverageCartDetails       string `json:"Beverage_Cart_Details__c"`
 }
 
 // wedgewoodRecord represents custom Wedgewood schema fields.
@@ -95,13 +53,15 @@ type wedgewoodRecord struct {
 	EndDateTime               string                   `json:"End_Date_Time_Formula__c"`
 	EventTypeDetail           string                   `json:"Event_Type_Detail__c"`
 	GuestCountFormula         interface{}              `json:"Guest_Count_Formula__c"`
+	Under21Formula            *float64                 `json:"Under_21_Formula__c"`
+	GuestOver21Formula        *float64                 `json:"Guest_Over_21_Formula__c"`
 	VenueName                 string                   `json:"Venue_Name__c"`
 	VenueId                   string                   `json:"Venue__c"`
 	VenueR                    *nameRelation            `json:"Venue__r"`                         // Venue__c lookup → Name
 	VenueGMR                  *nameRelation            `json:"Venue_GM__r"`                      // Venue_GM__c lookup → Name
 	CeremonyLocationR         *nameRelation            `json:"Wedgewood_Ceremony_Location_c__r"` // Area__c lookup → Name
 	PhotoboothSetupTime       interface{}              `json:"Photobooth_Setup_Time__c"`
-	IncludesPhotoBooth        float64                  `json:"Includes_Photo_Booth__c"`
+	IncludesPhotoBooth        *float64                 `json:"Includes_Photo_Booth__c"`
 	CocktailHourStartDateTime interface{}              `json:"Cocktail_Hour_Start_Date_Time__c"`
 	BarCocktailHourLocation   string                   `json:"Bar_Cocktail_Hour_Location__c"`
 	BarCocktailLocationR      *nameRelation            `json:"Bar_Cocktail_Hour_Location__r"` // Area__c lookup → Name
@@ -138,6 +98,8 @@ SELECT
   End_Date_Time_Formula__c,
   Event_Type_Detail__c,
   Guest_Count_Formula__c,
+  Under_21_Formula__c,
+  Guest_Over_21_Formula__c,
   Venue__c,
   Venue_Name__c,
   Venue__r.Name,
@@ -158,6 +120,21 @@ SELECT
   Contract_Signed__c,
   Primary_Planning_Details__r.Specialty_Drinks__c,
   Primary_Planning_Details__r.Chargers__c,
+  Primary_Planning_Details__r.Ceremony_Start_Time__c,
+  Primary_Planning_Details__r.Ceremony_Start_DateTime__c,
+  Primary_Planning_Details__r.Meal_Service_Time__c,
+  Primary_Planning_Details__r.Meal_Service_DateTime__c,
+  Primary_Planning_Details__r.Cocktail_Hour_Start_Time__c,
+  Primary_Planning_Details__r.Cocktail_Hour_Start_DateTime__c,
+  Primary_Planning_Details__r.Bar_Start_Time__c,
+  Primary_Planning_Details__r.Bar_Start_Date_Time__c,
+  Primary_Planning_Details__r.Bar_Close_Time__c,
+  Primary_Planning_Details__r.Bar_Close_DateTime__c,
+  Primary_Planning_Details__r.Bar_Last_Call_Time__c,
+  Primary_Planning_Details__r.Bar_Last_Call_DateTime__c,
+  Primary_Planning_Details__r.Anticipated_Bar_Activity__c,
+  Primary_Planning_Details__r.Other_Bar_Notes__c,
+  Primary_Planning_Details__r.Beverage_Cart_Details__c,
   SBQQ__PrimaryQuote__c
 FROM Opportunity
 WHERE Event_Start_Date_Only__c >= %s
@@ -303,39 +280,78 @@ func toWedgewoodEvent(o wedgewoodRecord) Event {
 
 	sigDrinks := ""
 	chargers := ""
+	var anticipatedBarActivity, otherBarNotes, beverageCartDetails, ceremonyStartTime, ceremonyStartDateTime string
+	var mealServiceTime, mealServiceDateTime, cocktailHourStartTime, cocktailHourStartDateTime string
+	var barStartTime, barStartDateTime, barCloseTime, barCloseDateTime, barLastCallTime, barLastCallDateTime string
 	if o.PrimaryPlanningDetails != nil {
 		sigDrinks = o.PrimaryPlanningDetails.SpecialtyDrinks
 		chargers = o.PrimaryPlanningDetails.Chargers
+		p := o.PrimaryPlanningDetails
+		anticipatedBarActivity = p.AnticipatedBarActivity
+		otherBarNotes = p.OtherBarNotes
+		beverageCartDetails = p.BeverageCartDetails
+		ceremonyStartTime, ceremonyStartDateTime = p.CeremonyStartTime, p.CeremonyStartDateTime
+		mealServiceTime, mealServiceDateTime = p.MealServiceTime, p.MealServiceDateTime
+		cocktailHourStartTime, cocktailHourStartDateTime = p.CocktailHourStartTime, p.CocktailHourStartDateTime
+		barStartTime, barStartDateTime = p.BarStartTime, p.BarStartDateTime
+		barCloseTime, barCloseDateTime = p.BarCloseTime, p.BarCloseDateTime
+		barLastCallTime, barLastCallDateTime = p.BarLastCallTime, p.BarLastCallDateTime
+	}
+
+	var photoBooth *bool
+	if o.PhotoboothSetupTime != nil {
+		booked := true
+		photoBooth = &booked
+	} else if o.IncludesPhotoBooth != nil {
+		booked := *o.IncludesPhotoBooth >= 1
+		photoBooth = &booked
 	}
 
 	return Event{
-		ID:                o.Id,
-		Name:              o.Name,
-		StageName:         o.StageName,
-		EventDate:         o.EventStartDateOnly,
-		DayOfWeek:         o.DayOfWeek,
-		StartTime:         cleanTime(o.StartDateTime),
-		EndTime:           cleanTime(o.EndDateTime),
-		EventType:         o.EventTypeDetail,
-		GuestCount:        guestCount,
-		Venue:             o.VenueName,
-		VenueID:           o.VenueId,
-		VenueProperty:     venueProperty,
-		VenueGM:           venueGM,
-		CeremonyLocation:  ceremonyLocation,
-		PhotoBooth:        o.PhotoboothSetupTime != nil || o.IncludesPhotoBooth >= 1,
-		PhotoboothStaffed: false, // Calculated during CPQ enrichment
-		HasBar:            o.CocktailHourStartDateTime != nil,
-		BarLocation:       barLocation,
-		SignatureDrinks:   sigDrinks,
-		ChargerPlates:     chargers,
-		Notes:             o.OtherNotesAboutDatesTxt,
-		Package:           o.PackageFormula,
-		Coordinator:       o.CoordinatorName,
-		DJName:            o.DJName,
-		DecorSetupTime:    o.DecorSetupTime,
-		BEONotes:          o.BEONotes,
-		ContractSigned:    o.ContractSigned,
+		ID:                        o.Id,
+		Name:                      o.Name,
+		StageName:                 o.StageName,
+		EventDate:                 o.EventStartDateOnly,
+		DayOfWeek:                 o.DayOfWeek,
+		StartTime:                 cleanTime(o.StartDateTime),
+		EndTime:                   cleanTime(o.EndDateTime),
+		EventType:                 o.EventTypeDetail,
+		GuestCount:                guestCount,
+		Under21Count:              o.Under21Formula,
+		Over21Count:               o.GuestOver21Formula,
+		Venue:                     o.VenueName,
+		VenueID:                   o.VenueId,
+		VenueProperty:             venueProperty,
+		VenueGM:                   venueGM,
+		CeremonyLocation:          ceremonyLocation,
+		PhotoBooth:                photoBooth,
+		PhotoboothStaffed:         false, // Calculated during CPQ enrichment
+		HasBar:                    o.CocktailHourStartDateTime != nil,
+		BarLocation:               barLocation,
+		AnticipatedBarActivity:    anticipatedBarActivity,
+		OtherBarNotes:             otherBarNotes,
+		BeverageCartDetails:       beverageCartDetails,
+		CeremonyStartTime:         ceremonyStartTime,
+		CeremonyStartDateTime:     ceremonyStartDateTime,
+		MealServiceTime:           mealServiceTime,
+		MealServiceDateTime:       mealServiceDateTime,
+		CocktailHourStartTime:     cocktailHourStartTime,
+		CocktailHourStartDateTime: cocktailHourStartDateTime,
+		BarStartTime:              barStartTime,
+		BarStartDateTime:          barStartDateTime,
+		BarCloseTime:              barCloseTime,
+		BarCloseDateTime:          barCloseDateTime,
+		BarLastCallTime:           barLastCallTime,
+		BarLastCallDateTime:       barLastCallDateTime,
+		SignatureDrinks:           sigDrinks,
+		ChargerPlates:             chargers,
+		Notes:                     o.OtherNotesAboutDatesTxt,
+		Package:                   o.PackageFormula,
+		Coordinator:               o.CoordinatorName,
+		DJName:                    o.DJName,
+		DecorSetupTime:            o.DecorSetupTime,
+		BEONotes:                  o.BEONotes,
+		ContractSigned:            o.ContractSigned,
 	}
 }
 
@@ -363,7 +379,6 @@ func toStandardEvent(s standardRecord) Event {
 		EventType:   eventType,
 		GuestCount:  0,  // not available on standard Opportunity — FE shows "Not set in Salesforce"
 		Venue:       "", // not available on standard Opportunity — FE shows "Not set in Salesforce"
-		PhotoBooth:  false,
 		HasBar:      false,
 		BarLocation: "",
 		Notes:       notes,
@@ -489,18 +504,13 @@ WHERE SBQQ__Opportunity2__c IN (%s)
 		if q.BarServiceType != nil {
 			barPackage = *q.BarServiceType
 		}
-		var hostedHours float64
-		if q.HostedBarHours != nil {
-			hostedHours = *q.HostedBarHours
-		}
-
 		qd := &QuoteDetails{
 			QuoteID:         q.Id,
 			QuoteNumber:     q.Name,
 			IsPrimary:       q.IsPrimary,
 			MealService:     mealService,
 			BarPackage:      barPackage,
-			HostedBarHours:  hostedHours,
+			HostedBarHours:  q.HostedBarHours,
 			LateNightSnacks: make([]string, 0),
 			BarItems:        make([]string, 0),
 			Appetizers:      make([]string, 0),
@@ -710,10 +720,69 @@ WHERE SBQQ__Quote__c IN (%s)
 	for oppId, qd := range oppToQuote {
 		for _, idx := range oppIndexMap[oppId] {
 			events[idx].Quote = qd
-			if events[idx].PhotoBooth && quoteStaffedPhotobooth[qd.QuoteID] {
+			if events[idx].PhotoBooth != nil && *events[idx].PhotoBooth && quoteStaffedPhotobooth[qd.QuoteID] {
 				events[idx].PhotoboothStaffed = true
 			}
 		}
 	}
 }
 
+// GetEventByID fetches a single Opportunity by Salesforce ID and returns it
+// as a fully-enriched Event (same pipeline as GetWeeklyEvents).
+func GetEventByID(c *Client, id string) (*Event, error) {
+	soql := fmt.Sprintf(`SELECT
+  Id, Name, StageName,
+  Event_Start_Date_Only__c, Day_of_Week__c,
+  Start_Date_Time_Formula__c, End_Date_Time_Formula__c,
+  Event_Type_Detail__c, Guest_Count_Formula__c,
+	Under_21_Formula__c, Guest_Over_21_Formula__c,
+  Venue__c, Venue_Name__c, Venue__r.Name, Venue_GM__r.Name,
+  Wedgewood_Ceremony_Location_c__c, Wedgewood_Ceremony_Location_c__r.Name,
+  Photobooth_Setup_Time__c, Includes_Photo_Booth__c,
+  Cocktail_Hour_Start_Date_Time__c,
+  Bar_Cocktail_Hour_Location__c, Bar_Cocktail_Hour_Location__r.Name,
+  Other_Notes_About_Dates_Txt__c, Package_Formula__c,
+  Wedgewood_Coordinator_Name__c, DJ_Name__c, Decor_Setup_Time__c,
+  Staff_Facing_BEO_Notes__c, Contract_Signed__c,
+  Primary_Planning_Details__r.Specialty_Drinks__c,
+  Primary_Planning_Details__r.Chargers__c,
+	Primary_Planning_Details__r.Ceremony_Start_Time__c,
+	Primary_Planning_Details__r.Ceremony_Start_DateTime__c,
+	Primary_Planning_Details__r.Meal_Service_Time__c,
+	Primary_Planning_Details__r.Meal_Service_DateTime__c,
+	Primary_Planning_Details__r.Cocktail_Hour_Start_Time__c,
+	Primary_Planning_Details__r.Cocktail_Hour_Start_DateTime__c,
+	Primary_Planning_Details__r.Bar_Start_Time__c,
+	Primary_Planning_Details__r.Bar_Start_Date_Time__c,
+	Primary_Planning_Details__r.Bar_Close_Time__c,
+	Primary_Planning_Details__r.Bar_Close_DateTime__c,
+	Primary_Planning_Details__r.Bar_Last_Call_Time__c,
+	Primary_Planning_Details__r.Bar_Last_Call_DateTime__c,
+	Primary_Planning_Details__r.Anticipated_Bar_Activity__c,
+	Primary_Planning_Details__r.Other_Bar_Notes__c,
+	Primary_Planning_Details__r.Beverage_Cart_Details__c,
+  SBQQ__PrimaryQuote__c
+FROM Opportunity
+WHERE Id = '%s'
+LIMIT 1`, id)
+
+	records, err := c.Query(soql)
+	if err != nil {
+		return nil, fmt.Errorf("SOQL query for event %s: %w", id, err)
+	}
+	if len(records) == 0 {
+		return nil, fmt.Errorf("event %s not found in Salesforce", id)
+	}
+
+	var opp wedgewoodRecord
+	if err := json.Unmarshal(records[0], &opp); err != nil {
+		return nil, fmt.Errorf("unmarshal event %s: %w", id, err)
+	}
+
+	evt := toWedgewoodEvent(opp)
+
+	// Enrich with CPQ quote (reuse weekly enrichment on a 1-element slice)
+	events := []Event{evt}
+	enrichEventsWithCPQQuotes(c, events)
+	return &events[0], nil
+}

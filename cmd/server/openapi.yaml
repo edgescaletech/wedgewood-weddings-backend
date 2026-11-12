@@ -478,7 +478,8 @@ components:
           example: "Lakeside Arbor"
         photoBooth:
           type: boolean
-          description: Indicates whether a photo booth is booked for the event.
+          nullable: true
+          description: Indicates whether a photo booth is booked; null means Salesforce did not provide a value.
           example: true
         photoboothStaffed:
           type: boolean
