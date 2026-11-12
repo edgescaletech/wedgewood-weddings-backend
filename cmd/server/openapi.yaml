@@ -148,6 +148,40 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /api/events/{id}:
+    get:
+      tags:
+        - Events & Catering Sync
+      summary: Get a wedding event by ID
+      description: Returns a single enriched wedding event from PostgreSQL, with a fallback to Salesforce.
+      operationId: getEventById
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Salesforce Opportunity ID for the event.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successfully retrieved the wedding event.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WeddingEvent'
+        '400':
+          description: Event ID is required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: The event could not be retrieved from Salesforce.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /api/labor-goals:
     get:
       tags:
