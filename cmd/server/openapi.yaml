@@ -14,10 +14,7 @@ info:
     email: salesforceadmin@wedgewoodweddings.com
 
 servers:
-  - url: http://localhost:8080
-    description: Local Go Backend Server
-  - url: https://wedgewood-wedding-backend.onrender.com
-    description: Production Server (Render)
+  - url: /
 
 tags:
   - name: System
