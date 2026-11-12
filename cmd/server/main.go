@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -14,11 +15,12 @@ import (
 	"time"
 
 	"wedding-project/internal/adapters/salesforce"
+	"wedding-project/internal/auth"
+	"wedding-project/internal/database"
 )
 
 //go:embed openapi.yaml
 var openAPISpec []byte
-
 
 // ---------------------------------------------------------------------------
 // .env loader
@@ -93,8 +95,8 @@ func weekBounds(weekParam string) (start, end time.Time, err error) {
 // ---------------------------------------------------------------------------
 
 type cacheEntry struct {
-	events    []salesforce.Event
-	cachedAt  time.Time
+	events   []salesforce.Event
+	cachedAt time.Time
 }
 
 type eventCache struct {
@@ -147,36 +149,6 @@ func healthzHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func authMeHandler(w http.ResponseWriter, r *http.Request) {
-	// Demo role switch: passing header X-Role: admin simulates an admin user
-	role := "gm"
-	if r.Header.Get("X-Role") == "admin" || r.URL.Query().Get("role") == "admin" {
-		role = "admin"
-	}
-
-	if role == "admin" {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"userId":         "0051P00000AdminHQ",
-			"name":           "Operations Director",
-			"email":          "director@wedgewoodweddings.com",
-			"role":           "admin",
-			"assignedVenues": "ALL",
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"userId": "0051P0000052FxxQAE",
-		"name":   "Jensen Hand",
-		"email":  "jensen.hand@wedgewoodweddings.com",
-		"role":   "gm",
-		"assignedVenues": []map[string]string{
-			{"venueId": "0011P000012oMy9QAE", "venueName": "Ken Caryl Vista"},
-		},
-	})
-}
-
-
 func openAPIHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/yaml")
 	w.WriteHeader(http.StatusOK)
@@ -220,7 +192,6 @@ func docsHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(html))
 }
-
 
 func eventsHandler(sf *salesforce.Client, cache *eventCache) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -294,7 +265,6 @@ func eventsHandler(sf *salesforce.Client, cache *eventCache) http.HandlerFunc {
 	}
 }
 
-
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -317,20 +287,38 @@ func main() {
 	}
 	log.Println("Salesforce client ready")
 
+	db, err := database.Open(context.Background(), os.Getenv("DATABASE_URL"))
+	if err != nil {
+		log.Fatal("database connection failed")
+	}
+	defer db.Close()
+	authServer, err := auth.New(auth.Config{ClientID: os.Getenv("WORKOS_CLIENT_ID"), APIKey: os.Getenv("WORKOS_API_KEY"), RedirectURI: os.Getenv("WORKOS_REDIRECT_URI"), CookiePassword: os.Getenv("WORKOS_COOKIE_PASSWORD"), Issuer: os.Getenv("WORKOS_ISSUER"), AppURL: os.Getenv("APP_URL"), Secure: os.Getenv("COOKIE_SECURE") != "false"}, db)
+	if err != nil {
+		log.Fatalf("authentication configuration: %v", err)
+	}
+
 	mux := http.NewServeMux()
 
 	cache := newEventCache(5 * time.Minute)
 
 	// Pure API routes
 	mux.HandleFunc("/healthz", healthzHandler)
-	mux.HandleFunc("/api/events", eventsHandler(sf, cache))
-	mux.HandleFunc("/api/auth/me", authMeHandler)
+	mux.Handle("/api/events", authServer.Middleware(eventsHandler(sf, cache)))
+	mux.HandleFunc("/auth/login", authServer.Login)
+	mux.HandleFunc("/auth/callback", authServer.Callback)
+	mux.HandleFunc("/auth/logout", authServer.Logout)
+	mux.Handle("/auth/me", authServer.Middleware(http.HandlerFunc(authServer.Me)))
+	mux.Handle("/api/auth/me", authServer.Middleware(http.HandlerFunc(authServer.Me)))
 	mux.HandleFunc("/docs", docsHandler)
 	mux.HandleFunc("/openapi.yaml", openAPIHandler)
 
 	// Global CORS & logging middleware
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Header.Get("Origin") == strings.TrimRight(os.Getenv("APP_URL"), "/") && r.Header.Get("Origin") != "" {
+			w.Header().Set("Access-Control-Allow-Origin", r.Header.Get("Origin"))
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Add("Vary", "Origin")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {

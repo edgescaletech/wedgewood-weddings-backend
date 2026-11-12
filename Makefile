@@ -23,3 +23,7 @@ tidy:
 ## clean: remove compiled binaries
 clean:
 	rm -f server pubsub
+
+## migrate: apply PostgreSQL migrations (requires DATABASE_URL)
+migrate:
+	go run ./cmd/migrate
