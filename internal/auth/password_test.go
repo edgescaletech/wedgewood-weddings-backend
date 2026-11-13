@@ -65,7 +65,13 @@ func TestPasswordLoginCreatesSession(t *testing.T) {
 		t.Fatalf("status %d, WorkOS calls %d", recorder.Code, provider.calls)
 	}
 	cookies := recorder.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != "session" || !cookies[0].HttpOnly {
+	foundSession := false
+	for _, cookie := range cookies {
+		if cookie.Name == "session" && cookie.HttpOnly && cookie.Value != "" {
+			foundSession = true
+		}
+	}
+	if !foundSession {
 		t.Fatal("missing HTTP-only session cookie")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

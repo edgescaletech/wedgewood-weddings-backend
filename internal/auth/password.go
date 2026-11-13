@@ -33,6 +33,9 @@ func (server *Server) PasswordLogin(writer http.ResponseWriter, request *http.Re
 		return
 	}
 
+	// Starting a new login invalidates any earlier email verification challenge.
+	server.cookie(writer, verificationCookie, "", -1)
+
 	contentType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
 	if err != nil || contentType != "application/json" {
 		fail(writer, http.StatusUnsupportedMediaType, "expected application/json")
@@ -66,8 +69,14 @@ func (server *Server) PasswordLogin(writer http.ResponseWriter, request *http.Re
 	}
 
 	response, err := provider.Password(request.Context(), credentials.Email, credentials.Password)
-	
+
 	if err != nil {
+		// A pending token is stored in an encrypted HttpOnly cookie, never JSON.
+		var verification *workos.EmailVerificationRequiredError
+		if errors.As(err, &verification) && verification.APIError != nil && verification.PendingAuthenticationToken != "" {
+			server.beginEmailVerification(writer, verification.PendingAuthenticationToken)
+			return
+		}
 		// Never log WorkOS errors: they may contain pending authentication tokens.
 		var apiError *workos.APIError
 		var networkError *workos.NetworkError

@@ -65,7 +65,7 @@ Go HTTP API for the venue scheduling prototype. Salesforce provides event data; 
    openssl rand -hex 32
    ```
 
-6. Set `APP_URL` to your frontend's origin. The backend currently uses the WorkOS-hosted sign-in page; the application frontend is maintained separately. If testing without a frontend, you can use `http://localhost:8080` as `APP_URL`, but the backend has no page at `/`.
+6. Set `APP_URL` to your frontend's origin. The application frontend is maintained separately; it can use the custom password endpoint or the hosted WorkOS sign-in flow. If testing without a frontend, you can use `http://localhost:8080` as `APP_URL`, but the backend has no page at `/`.
 
 ## Authentication flow
 
@@ -74,6 +74,19 @@ Go HTTP API for the venue scheduling prototype. Salesforce provides event data; 
 3. The backend creates an inactive local user if one does not already exist, establishes a session, and redirects the browser to `APP_URL`.
 4. A privately authorized operator must activate a new local user before protected endpoints can be used. See [Activate a user](#activate-a-user).
 5. The frontend can call `GET /auth/me` with credentials to retrieve the active local identity. `GET /api/auth/me` is an alias.
+
+### Custom sign-in, verification, and password recovery
+
+The custom frontend can submit JSON to the following endpoints. All requests must use `POST`, `Content-Type: application/json`, and an `Origin` matching `APP_URL`; browser requests must include credentials.
+
+1. `POST /auth/password` with `{"email":"...","password":"..."}` returns `204` with a session cookie on success. If WorkOS requires email verification, it returns `202` and `{"status":"email_verification_required"}` with a short-lived encrypted HttpOnly challenge cookie.
+2. When verification is required, `POST /auth/verify-email` with `{"code":"..."}` and the challenge cookie. A successful response returns `204` and creates the usual session. Incorrect or expired challenges do not grant access. An expired challenge requires signing in again.
+3. `POST /auth/forgot-password` with `{"email":"..."}` requests a WorkOS reset email. The `204` response does not reveal whether the account exists.
+4. The frontend reset page reads the one-time `token` from the email link and sends it to `POST /auth/reset-password` as `{"token":"...","newPassword":"..."}`. A successful response returns `204`. WorkOS revokes its sessions and the backend deletes local sessions for that user; the user must sign in again.
+
+In WorkOS, enable the email verification and password reset emails, and configure the password reset URL under **Applications → your application → Redirects** to point to the frontend reset page. That page must capture the `token` query parameter and should remove it from the address bar after reading it. Do not log or send tokens to analytics. The frontend still needs to implement the verification and reset screens. WorkOS applies its password policy and sends emails; this backend does not store passwords or send emails itself. WorkOS MFA, SSO, and Radar challenges are not implemented in the custom flow. Configure appropriate per-IP abuse protection before public deployment.
+
+If WorkOS resets the password but PostgreSQL session cleanup fails, the endpoint returns `503` explaining that the password changed. Local sessions may remain usable until their access tokens expire; an operator must remove that user's local sessions. This cross-service failure requires operational attention.
 
 For same-site, cross-origin browser requests, configure `APP_URL` to the exact frontend origin and send requests with credentials, for example:
 
@@ -105,6 +118,10 @@ Copy the complete ID, not a truncated value from a table display. There is no pu
 | Route | Purpose | Access |
 | --- | --- | --- |
 | `GET /healthz` | Health check | Public |
+| `POST /auth/password` | Sign in with email and password | Public; matching `Origin` required |
+| `POST /auth/verify-email` | Complete an email verification challenge | Public; challenge cookie and matching `Origin` required |
+| `POST /auth/forgot-password` | Request a reset email | Public; matching `Origin` required |
+| `POST /auth/reset-password` | Reset a password using a one-time token | Public; matching `Origin` required |
 | `GET /auth/login` | Redirect to WorkOS AuthKit | Public |
 | `GET /auth/callback` | Complete the WorkOS sign-in flow | Public; validates OAuth state |
 | `GET /auth/me`, `GET /api/auth/me` | Current local user | Active session required |

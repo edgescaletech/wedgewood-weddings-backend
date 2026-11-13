@@ -12,7 +12,7 @@ paths:
   /auth/password:
     post:
       summary: Sign in with email and password
-      description: Requires an Origin matching APP_URL. WorkOS verifies credentials; additional verification challenges are not yet supported.
+      description: Requires an Origin matching APP_URL. WorkOS verifies credentials; email verification may be required.
       requestBody:
         required: true
         content:
@@ -25,11 +25,67 @@ paths:
                 password: {type: string, format: password}
       responses:
         '204': {description: Session cookie created}
+        '202': {description: Email verification required; an encrypted challenge cookie is set}
         '400': {description: Invalid request}
         '401': {description: Sign-in failed or requires additional verification}
         '403': {description: Invalid origin}
         '429': {description: Too many attempts}
         '503': {description: Authentication unavailable}
+  /auth/verify-email:
+    post:
+      summary: Complete email verification after password sign-in
+      description: Requires a matching Origin and the encrypted verification cookie returned by password sign-in.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: {type: string}
+      responses:
+        '204': {description: Email verified and session cookie created}
+        '401': {description: Invalid or expired challenge}
+        '403': {description: Invalid origin}
+        '503': {description: Verification temporarily unavailable}
+  /auth/forgot-password:
+    post:
+      summary: Request a password reset email
+      description: Returns the same response whether the email exists; requires a matching Origin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: {type: string, format: email}
+      responses:
+        '204': {description: Reset request accepted}
+        '400': {description: Invalid request}
+        '403': {description: Invalid origin}
+        '503': {description: Reset temporarily unavailable}
+  /auth/reset-password:
+    post:
+      summary: Set a new password using the token from the reset link
+      description: Requires a matching Origin. Successful reset invalidates local sessions.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, newPassword]
+              properties:
+                token: {type: string}
+                newPassword: {type: string, format: password}
+      responses:
+        '204': {description: Password reset completed}
+        '400': {description: Invalid token or password}
+        '403': {description: Invalid origin}
+        '503': {description: WorkOS unavailable or local session cleanup failed}
   /auth/login:
     get:
       summary: Begin hosted AuthKit sign-in

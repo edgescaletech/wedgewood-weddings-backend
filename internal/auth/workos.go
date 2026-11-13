@@ -66,3 +66,25 @@ func (p workOS) Password(ctx context.Context, email, password string) (*workos.A
 		&workos.UserManagementAuthenticateWithPasswordParams{Email: email, Password: password},
 	)
 }
+
+// VerifyEmail completes a WorkOS email verification challenge.
+func (p workOS) VerifyEmail(ctx context.Context, pendingToken, code string) (*workos.AuthenticateResponse, error) {
+	return p.c.UserManagement().AuthenticateWithEmailVerification(ctx, &workos.UserManagementAuthenticateWithEmailVerificationParams{
+		PendingAuthenticationToken: pendingToken,
+		Code:                       code,
+	})
+}
+
+// RequestPasswordReset asks WorkOS to email a password reset link.
+func (p workOS) RequestPasswordReset(ctx context.Context, email string) error {
+	_, err := p.c.UserManagement().ResetPassword(ctx, &workos.UserManagementResetPasswordParams{Email: email})
+	return err
+}
+
+// ConfirmPasswordReset exchanges a one-time token for a new password.
+func (p workOS) ConfirmPasswordReset(ctx context.Context, token, password string) (*workos.ResetPasswordResponse, error) {
+	return p.c.UserManagement().ConfirmPasswordReset(ctx, &workos.UserManagementConfirmPasswordResetParams{
+		Token:       token,
+		NewPassword: password,
+	})
+}
