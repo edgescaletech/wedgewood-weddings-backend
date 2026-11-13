@@ -298,8 +298,12 @@ func main() {
 
 	// Pure API routes
 	mux.HandleFunc("/healthz", healthzHandler)
-	mux.Handle("/api/events", authServer.Middleware(eventsHandler(db, sf)))
-	mux.Handle("/api/events/", authServer.Middleware(eventByIDHandler(db, sf)))
+	
+	// mux.Handle("/api/events", authServer.Middleware(eventsHandler(db, sf)))
+	// mux.Handle("/api/events/", authServer.Middleware(eventByIDHandler(db, sf)))
+	mux.HandleFunc("/api/events", eventsHandler(db, sf))
+	mux.HandleFunc("/api/events/", eventByIDHandler(db, sf))
+
 	mux.HandleFunc("/auth/login", authServer.Login)
 	mux.HandleFunc("/auth/password", authServer.PasswordLogin)
 	mux.HandleFunc("/auth/verify-email", authServer.VerifyEmail)
