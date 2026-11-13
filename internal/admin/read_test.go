@@ -34,6 +34,18 @@ func TestAdminRoutesRequireAuthentication(t *testing.T) {
 			t.Errorf("%s: got %d, want 401", path, response.Code)
 		}
 	}
+	for _, endpoint := range []struct{ method, path string }{
+		{http.MethodPost, "/api/admin/users"},
+		{http.MethodPost, "/api/admin/users/00000000-0000-4000-8000-000000000001/roles"},
+		{http.MethodPut, "/api/admin/roles/00000000-0000-4000-8000-000000000001/permissions"},
+		{http.MethodDelete, "/api/admin/users/00000000-0000-4000-8000-000000000001"},
+	} {
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, httptest.NewRequest(endpoint.method, endpoint.path, nil))
+		if response.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s: got %d, want 401", endpoint.method, endpoint.path, response.Code)
+		}
+	}
 }
 
 func TestPaginationRejectsInvalidValues(t *testing.T) {

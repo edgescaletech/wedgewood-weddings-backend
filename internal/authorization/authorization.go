@@ -17,12 +17,25 @@ type Service struct{ DB *sql.DB }
 // HasPermission enforces active status, scope, and deny-before-allow precedence.
 // Venue IDs are Salesforce IDs, matching the existing venues primary key.
 func (service *Service) HasPermission(ctx context.Context, userID, permission string, venueID *string) (bool, error) {
+	return hasPermission(ctx, service.DB, userID, permission, venueID)
+}
+
+// HasPermissionTx evaluates permissions inside the caller's transaction.
+func HasPermissionTx(ctx context.Context, tx *sql.Tx, userID, permission string, venueID *string) (bool, error) {
+	return hasPermission(ctx, tx, userID, permission, venueID)
+}
+
+type queryRower interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func hasPermission(ctx context.Context, db queryRower, userID, permission string, venueID *string) (bool, error) {
 	// Administrative capabilities are always global, even when a venue is supplied.
 	if strings.HasPrefix(permission, "users.") || strings.HasPrefix(permission, "roles.") || permission == "venues.manage_access" {
 		venueID = nil
 	}
 	var allowed bool
-	err := service.DB.QueryRowContext(ctx, `
+	err := db.QueryRowContext(ctx, `
 WITH membership AS (
  SELECT EXISTS(SELECT 1 FROM user_roles ur JOIN roles r ON r.id=ur.role_id
    WHERE ur.user_id=$1 AND r.scope='global' AND ur.venue_id IS NULL) AS global_access,

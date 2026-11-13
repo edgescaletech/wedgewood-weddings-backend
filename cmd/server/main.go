@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	workos "github.com/workos/workos-go/v7"
 	"wedding-project/internal/adapters/salesforce"
 	"wedding-project/internal/admin"
 	"wedding-project/internal/auth"
@@ -374,7 +375,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	adminServer := &admin.Server{DB: db, Auth: authServer, Access: &authorization.Service{DB: db}}
+	adminServer := &admin.Server{DB: db, Auth: authServer, Access: &authorization.Service{DB: db}, AppURL: os.Getenv("APP_URL"), Identity: admin.WorkOSIdentityProvider{Client: workos.NewClient(os.Getenv("WORKOS_API_KEY"))}}
 	adminServer.Register(mux)
 
 	// Pure API routes
@@ -406,7 +407,7 @@ func main() {
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Add("Vary", "Origin")
 		}
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

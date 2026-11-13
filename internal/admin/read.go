@@ -15,9 +15,11 @@ import (
 
 // Server provides authenticated and authorized administrative endpoints.
 type Server struct {
-	DB     *sql.DB
-	Auth   *auth.Server
-	Access *authorization.Service
+	DB       *sql.DB
+	Auth     *auth.Server
+	Access   *authorization.Service
+	AppURL   string
+	Identity IdentityProvider
 }
 
 // Register mounts read-only admin endpoints behind authentication and RBAC.
@@ -33,6 +35,7 @@ func (server *Server) Register(mux *http.ServeMux) {
 	register("GET /api/admin/permissions", "roles.view", server.permissions)
 	register("GET /api/admin/venues", "venues.manage_access", server.venues)
 	register("GET /api/admin/venues/{id}", "venues.manage_access", server.venue)
+	server.registerMutations(mux)
 }
 
 // pagination limits response size and rejects malformed paging parameters.
@@ -87,8 +90,13 @@ func (server *Server) users(writer http.ResponseWriter, request *http.Request) {
 		respond(writer, http.StatusBadRequest, map[string]string{"error": "search too long"})
 		return
 	}
+	active := request.URL.Query().Get("active")
+	if active != "" && active != "true" && active != "false" {
+		respond(writer, http.StatusBadRequest, map[string]string{"error": "invalid active filter"})
+		return
+	}
 	server.queryJSON(writer, request, `SELECT COALESCE(jsonb_agg(to_jsonb(t)),'[]'::jsonb) FROM
- (SELECT id,workos_id,email,is_active,created_at,updated_at FROM users WHERE position(lower($1) in lower(email))>0 ORDER BY email,id LIMIT $2 OFFSET $3) t`, search, limit, offset)
+ (SELECT id,workos_id,email,display_name,is_active,archived_at,created_at,updated_at FROM users WHERE position(lower($1) in lower(email))>0 AND ($4='' OR is_active=($4='true')) ORDER BY email,id LIMIT $2 OFFSET $3) t`, search, limit, offset, active)
 }
 
 func (server *Server) user(writer http.ResponseWriter, request *http.Request) {
@@ -97,7 +105,7 @@ func (server *Server) user(writer http.ResponseWriter, request *http.Request) {
 		respond(writer, http.StatusBadRequest, map[string]string{"error": "invalid user id"})
 		return
 	}
-	server.queryJSON(writer, request, `SELECT jsonb_build_object('id',u.id,'workosId',u.workos_id,'email',u.email,'isActive',u.is_active,
+	server.queryJSON(writer, request, `SELECT jsonb_build_object('id',u.id,'workosId',u.workos_id,'email',u.email,'displayName',u.display_name,'isActive',u.is_active,'archivedAt',u.archived_at,
  'roles',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',ur.id,'roleId',r.id,'name',r.name,'scope',r.scope,'venueId',ur.venue_id)) FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=u.id),'[]'::jsonb)) FROM users u WHERE u.id=$1`, id)
 }
 
