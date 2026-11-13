@@ -69,6 +69,14 @@ Go HTTP API for the venue scheduling prototype. Salesforce provides event data; 
 
 ## Authentication flow
 
+### Admin management status
+
+The Admin Management backend is **incomplete**. The current implementation includes the RBAC schema, permission resolver, one-time bootstrap command, and protected read-only user, role, permission and venue endpoints. Administrative mutations, final-admin lockout protections, full audit coverage, and the remaining endpoint/test coverage are not implemented. Do not deploy this as a complete admin platform.
+
+After applying migration 003, an operator can bootstrap one administrator. The user must already have a local account from WorkOS sign-in, a verified WorkOS email, and an active membership in the configured WorkOS organization with the configured bootstrap role. Set `WORKOS_API_KEY`, `DATABASE_URL`, `BOOTSTRAP_WORKOS_USER_ID`, `BOOTSTRAP_WORKOS_ORGANIZATION_ID`, and `BOOTSTRAP_WORKOS_ROLE_SLUG` in the operator's environment, then run `go run ./cmd/bootstrap-admin`. The command verifies WorkOS directly, activates that existing local user, assigns the global Admin role, writes an audit record, and records a one-time marker. Do not expose the command or credentials to users. Following bootstrap, permission checks use PostgreSQL.
+
+Existing venue identifiers are Salesforce text IDs, not UUIDs. A permission check requires an active local user and matching role scope; explicit denies override allows, which override inherited role permissions. A venue role grants access only to its assigned venue, while administrative permissions require a global role. Existing event routes remain authenticated but are not yet governed by scheduling permissions.
+
 1. Navigate the browser to `GET /auth/login` on the backend. It redirects to the hosted WorkOS AuthKit sign-in page.
 2. WorkOS redirects to `GET /auth/callback`. The backend checks OAuth state, exchanges the code, verifies the access token, and links the user by their immutable WorkOS user ID.
 3. The backend creates an active local user if one does not already exist, establishes a session, and redirects the browser to `APP_URL`. Existing users retain their current active status.

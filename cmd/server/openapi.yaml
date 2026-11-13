@@ -9,6 +9,69 @@ paths:
       summary: Health check
       responses:
         '200': {description: Healthy}
+  /api/admin/users:
+    get:
+      summary: List local users (users.view)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: search, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0}}
+      responses:
+        '200': {description: User list}
+        '401': {description: Authentication required}
+        '403': {description: Permission denied}
+  /api/admin/users/{id}:
+    get:
+      summary: Get user and assigned roles (users.view)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200': {description: User details}
+        '404': {description: User not found}
+  /api/admin/roles:
+    get:
+      summary: List predefined roles and current permissions (roles.view)
+      security: [{SessionCookie: []}]
+      responses:
+        '200': {description: Role list}
+  /api/admin/roles/{id}:
+    get:
+      summary: Get a predefined role and permissions (roles.view)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200': {description: Role details}
+  /api/admin/roles/{id}/permissions:
+    get:
+      summary: Get permissions for a role (roles.view)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200': {description: Role and permissions}
+  /api/admin/permissions:
+    get:
+      summary: List permission definitions (roles.view)
+      security: [{SessionCookie: []}]
+      responses:
+        '200': {description: Permission list}
+  /api/admin/venues:
+    get:
+      summary: List venues (venues.manage_access)
+      security: [{SessionCookie: []}]
+      responses:
+        '200': {description: Venue list}
+  /api/admin/venues/{id}:
+    get:
+      summary: Get a venue by Salesforce ID (venues.manage_access)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Venue details}
   /auth/signup:
     post:
       summary: Temporarily create a WorkOS password account

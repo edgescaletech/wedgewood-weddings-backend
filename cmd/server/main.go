@@ -16,7 +16,9 @@ import (
 	"time"
 
 	"wedding-project/internal/adapters/salesforce"
+	"wedding-project/internal/admin"
 	"wedding-project/internal/auth"
+	"wedding-project/internal/authorization"
 	"wedding-project/internal/database"
 	"wedding-project/internal/jobs"
 	"wedding-project/internal/pubsub"
@@ -372,6 +374,8 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+	adminServer := &admin.Server{DB: db, Auth: authServer, Access: &authorization.Service{DB: db}}
+	adminServer.Register(mux)
 
 	// Pure API routes
 	mux.HandleFunc("/healthz", healthzHandler)
