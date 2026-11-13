@@ -73,7 +73,7 @@ Go HTTP API for the venue scheduling prototype. Salesforce provides event data; 
 2. WorkOS redirects to `GET /auth/callback`. The backend checks OAuth state, exchanges the code, verifies the access token, and links the user by their immutable WorkOS user ID.
 3. The backend creates an inactive local user if one does not already exist, establishes a session, and redirects the browser to `APP_URL`.
 4. A privately authorized operator must activate a new local user before protected endpoints can be used. See [Activate a user](#activate-a-user).
-5. The frontend can call `GET /auth/me` with credentials to retrieve the active local identity. `GET /api/auth/me` is an alias.
+5. The frontend can call `GET /auth/me` with credentials to retrieve the active local identity.
 
 ### Custom sign-in, verification, and password recovery
 
@@ -124,7 +124,7 @@ Copy the complete ID, not a truncated value from a table display. There is no pu
 | `POST /auth/reset-password` | Reset a password using a one-time token | Public; matching `Origin` required |
 | `GET /auth/login` | Redirect to WorkOS AuthKit | Public |
 | `GET /auth/callback` | Complete the WorkOS sign-in flow | Public; validates OAuth state |
-| `GET /auth/me`, `GET /api/auth/me` | Current local user | Active session required |
+| `GET /auth/me` | Current local user | Active session required |
 | `POST /auth/logout` | Remove local session and attempt WorkOS session revocation | Requires session cookie and matching `Origin` |
 | `GET /api/events?week=YYYY-MM-DD` | Event data for a week | Active session required |
 | `GET /api/events/{id}` | Event details | Active session required |
