@@ -8,6 +8,22 @@ services:
     buildCommand: go build -o server ./cmd/server/
     startCommand: ./server
     envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: WORKOS_API_KEY
+        sync: false
+      - key: WORKOS_CLIENT_ID
+        sync: false
+      - key: WORKOS_REDIRECT_URI
+        sync: false
+      - key: WORKOS_ISSUER
+        sync: false
+      - key: WORKOS_COOKIE_PASSWORD
+        sync: false
+      - key: APP_URL
+        sync: false
+      - key: COOKIE_SECURE
+        value: "true"
       - key: SF_MY_DOMAIN_URL
         sync: false        # set manually in Render dashboard
       - key: SF_CLIENT_ID

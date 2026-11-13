@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"wedding-project/internal/adapters/salesforce"
+	"wedding-project/internal/auth"
 	"wedding-project/internal/database"
 	"wedding-project/internal/pubsub"
 	"wedding-project/internal/repositories"
@@ -96,35 +97,6 @@ func weekBounds(weekParam string) (start, end time.Time, err error) {
 
 func healthzHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func authMeHandler(w http.ResponseWriter, r *http.Request) {
-	// Demo role switch: passing header X-Role: admin simulates an admin user
-	role := "gm"
-	if r.Header.Get("X-Role") == "admin" || r.URL.Query().Get("role") == "admin" {
-		role = "admin"
-	}
-
-	if role == "admin" {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"userId":         "0051P00000AdminHQ",
-			"name":           "Operations Director",
-			"email":          "director@wedgewoodweddings.com",
-			"role":           "admin",
-			"assignedVenues": "ALL",
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"userId": "0051P0000052FxxQAE",
-		"name":   "Jensen Hand",
-		"email":  "jensen.hand@wedgewoodweddings.com",
-		"role":   "gm",
-		"assignedVenues": []map[string]string{
-			{"venueId": "0011P000012oMy9QAE", "venueName": "Ken Caryl Vista"},
-		},
-	})
 }
 
 func openAPIHandler(w http.ResponseWriter, r *http.Request) {
@@ -311,36 +283,47 @@ func main() {
 	}
 	log.Println("Salesforce client ready")
 
-	// Database connection & initialization
-	dbURL := os.Getenv("DATABASE_URL")
-	var db *sql.DB
-	if dbURL != "" {
-		var err error
-		db, err = database.Connect(dbURL)
-		if err != nil {
-			log.Printf("WARNING: Failed to connect to database: %v. Running in direct Salesforce mode.", err)
-		} else {
-			log.Println("PostgreSQL connected.")
-			// Start background real-time Pub/Sub subscriber
-			pubsub.StartBackgroundSubscriber(context.Background(), db, sf, cfg.MyDomainURL, cfg.ClientID, cfg.ClientSecret)
-		}
-	} else {
-		log.Println("INFO: DATABASE_URL not set; running in direct Salesforce mode.")
+	db, err := database.Open(context.Background(), os.Getenv("DATABASE_URL"))
+	if err != nil {
+		log.Fatal("database connection failed")
+	}
+	defer db.Close()
+	pubsub.StartBackgroundSubscriber(context.Background(), db, sf, cfg.MyDomainURL, cfg.ClientID, cfg.ClientSecret)
+	authServer, err := auth.New(auth.Config{ClientID: os.Getenv("WORKOS_CLIENT_ID"), APIKey: os.Getenv("WORKOS_API_KEY"), RedirectURI: os.Getenv("WORKOS_REDIRECT_URI"), CookiePassword: os.Getenv("WORKOS_COOKIE_PASSWORD"), Issuer: os.Getenv("WORKOS_ISSUER"), AppURL: os.Getenv("APP_URL"), Secure: os.Getenv("COOKIE_SECURE") != "false"}, db)
+	if err != nil {
+		log.Fatalf("authentication configuration: %v", err)
 	}
 
 	mux := http.NewServeMux()
 
 	// Pure API routes
 	mux.HandleFunc("/healthz", healthzHandler)
-	mux.HandleFunc("/api/events", eventsHandler(db, sf))
-	mux.HandleFunc("/api/events/", eventByIDHandler(db, sf)) // GET /api/events/{id}
-	mux.HandleFunc("/api/auth/me", authMeHandler)
+
+	mux.Handle("/api/events", authServer.Middleware(eventsHandler(db, sf)))
+	mux.Handle("/api/events/", authServer.Middleware(eventByIDHandler(db, sf)))
+
+	mux.HandleFunc("/auth/login", authServer.Login)
+	mux.HandleFunc("/auth/password", authServer.PasswordLogin)
+
+	// Temporary signup endpoint; remove this route to disable account creation.
+	mux.Handle("/auth/signup", authServer.SignupRateLimit(http.HandlerFunc(authServer.Signup)))
+
+	mux.HandleFunc("/auth/verify-email", authServer.VerifyEmail)
+	mux.HandleFunc("/auth/forgot-password", authServer.ForgotPassword)
+	mux.HandleFunc("/auth/reset-password", authServer.ResetPassword)
+	mux.HandleFunc("/auth/callback", authServer.Callback)
+	mux.HandleFunc("/auth/logout", authServer.Logout)
+	mux.Handle("/auth/me", authServer.Middleware(http.HandlerFunc(authServer.Me)))
 	mux.HandleFunc("/docs", docsHandler)
 	mux.HandleFunc("/openapi.yaml", openAPIHandler)
 
 	// Global CORS & logging middleware
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Header.Get("Origin") == strings.TrimRight(os.Getenv("APP_URL"), "/") && r.Header.Get("Origin") != "" {
+			w.Header().Set("Access-Control-Allow-Origin", r.Header.Get("Origin"))
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Add("Vary", "Origin")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {

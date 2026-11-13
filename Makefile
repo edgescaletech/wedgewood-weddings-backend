@@ -28,6 +28,9 @@ tidy:
 clean:
 	rm -f server pubsub
 
+## migrate: apply PostgreSQL migrations (requires DATABASE_URL)
+migrate:
+	go run ./cmd/migrate
 ## migration.up: apply all pending migrations to the database
 migration.up:
 	migrate -path $(MIGRATIONS_DIR) -database "$(DB_URL)" up

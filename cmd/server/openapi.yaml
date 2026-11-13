@@ -1,429 +1,199 @@
 openapi: 3.0.3
 info:
-  title: Wedgewood Weddings Event Sync & Labor Planning API
-  description: |
-    Unified REST API for Wedgewood Weddings:
-    1. **Events & Catering Sync**: Synchronizes weekly wedding event schedules, catering menus, bar packages, and rental details directly from Salesforce Opportunity, CPQ Quote, and CPQ QuoteLine records.
-    2. **Role-Based Access Control (RBAC)**:
-       - **Admin (Director/HQ)**: Full access to all events across all 109 venues nationwide.
-       - **General Manager (GM) / Coordinator**: Automatically scoped to view only their assigned/mapped venue properties.
-    3. **Labor Goals & Staffing**: Allows Admins to upload labor goal CSV files and manage staff targets, budgeted hours, and role requirements via full CRUD operations.
-  version: 1.2.0
-  contact:
-    name: Wedgewood Weddings Tech Team
-    email: salesforceadmin@wedgewoodweddings.com
-
-servers:
-  - url: /
-
-tags:
-  - name: System
-    description: Liveness and service discovery endpoints
-  - name: Role-Based Access Control (RBAC)
-    description: User identity, roles, and venue mapping permissions
-  - name: Events & Catering Sync
-    description: Salesforce Opportunity and CPQ Quote enrichment (scoped by role)
-  - name: Labor Goals & Staffing
-    description: Admin CSV upload and CRUD operations for event labor targets
-
+  title: Wedgewood Weddings API
+  version: 1.0.0
+  description: AuthKit authentication prototype. Active users currently have access to all venues.
 paths:
   /healthz:
     get:
-      tags:
-        - System
-      summary: Health check endpoint
-      description: Returns service liveness status.
-      operationId: getHealthStatus
+      summary: Health check
       responses:
-        '200':
-          description: Service is healthy and operational.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: "ok"
-
-  /api/auth/me:
-    get:
-      tags:
-        - Role-Based Access Control (RBAC)
-      summary: Get current user profile and venue mappings
-      description: |
-        Returns the authenticated user's role and their assigned venue properties.
-        - **Admin**: Has global access (`assignedVenues: "ALL"`).
-        - **GM**: Restricted to mapped properties (e.g. `Ken Caryl Vista`, `Boulder Creek`).
-        - **Coordinator / Staff**: Restricted to their single assigned venue.
-      operationId: getCurrentUser
-      security:
-        - BearerAuth: []
-      responses:
-        '200':
-          description: User profile and venue mapping permissions.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/UserProfileResponse'
-        '401':
-          description: Missing or invalid authentication token.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
-  /api/events:
-    get:
-      tags:
-        - Events & Catering Sync
-      summary: Get weekly wedding events (scoped by role & venue)
-      description: |
-        Retrieves wedding events for the ISO week containing the specified date.
-        
-        **RBAC Venue Scoping:**
-        - **Admin**: Can view all events nationwide across all 109 venues, or filter by any `venueId`.
-        - **GM / Coordinator**: The backend automatically filters results to return **only events belonging to their mapped venue(s)**. If a GM requests an unassigned venue ID, the server responds with `403 Forbidden`.
-        
-        Results are enriched with primary CPQ Quotes and QuoteLines, and cached in memory for 5 minutes.
-      operationId: getWeeklyEvents
-      security:
-        - BearerAuth: []
-      parameters:
-        - name: week
-          in: query
-          required: false
-          description: |
-            An anchor date within the target week in `YYYY-MM-DD` format.
-            If omitted, defaults to the current date/week.
-          schema:
-            type: string
-            format: date
-            example: "2026-11-02"
-        - name: venueId
-          in: query
-          required: false
-          description: |
-            Optional Salesforce Account ID of a specific venue (e.g. `0011P000012oMy9QAE`).
-            - **Admin**: Can specify any venue ID or leave empty to see all.
-            - **GM**: Must be one of their mapped venue IDs.
-          schema:
-            type: string
-            example: "0011P000012oMy9QAE"
-        - name: refresh
-          in: query
-          required: false
-          description: Set to `true` to bypass the 5-minute cache and query Salesforce directly.
-          schema:
-            type: boolean
-            default: false
-            example: false
-
-      responses:
-        '200':
-          description: Successfully retrieved weekly wedding events.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/WeeklyEventsResponse'
-        '400':
-          description: Invalid request parameters (e.g. invalid date format).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '403':
-          description: Forbidden - User is not authorized to access events for this venue.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '500':
-          description: Internal server error or failure querying Salesforce.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
-  /api/events/{id}:
-    get:
-      tags:
-        - Events & Catering Sync
-      summary: Get a wedding event by ID
-      description: Returns a single enriched wedding event from PostgreSQL, with a fallback to Salesforce.
-      operationId: getEventById
-      parameters:
-        - name: id
-          in: path
-          required: true
-          description: Salesforce Opportunity ID for the event.
-          schema:
-            type: string
-      responses:
-        '200':
-          description: Successfully retrieved the wedding event.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/WeddingEvent'
-        '400':
-          description: Event ID is required.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '404':
-          description: The event could not be retrieved from Salesforce.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
-  /api/labor-goals:
-    get:
-      tags:
-        - Labor Goals & Staffing
-      summary: Get labor goals
-      description: Retrieve labor goals filtered by planning week and optionally by venue.
-      operationId: getLaborGoals
-      security:
-        - BearerAuth: []
-      parameters:
-        - name: week
-          in: query
-          required: true
-          description: Monday date of the target planning week (YYYY-MM-DD).
-          schema:
-            type: string
-            format: date
-            example: "2026-11-02"
-        - name: venueId
-          in: query
-          required: false
-          description: Optional Salesforce Account ID of the venue to filter goals.
-          schema:
-            type: string
-            example: "0011P000012oMxxQAE"
-      responses:
-        '200':
-          description: Labor goals retrieved successfully.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/LaborGoalsListResponse'
-        '400':
-          description: Missing or invalid query parameters.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
+        '200': {description: Healthy}
+  /auth/signup:
     post:
-      tags:
-        - Labor Goals & Staffing
-      summary: Create a single labor goal
-      description: Manually adds an individual role target or labor goal record.
-      operationId: createLaborGoal
-      security:
-        - BearerAuth: []
+      summary: Temporarily create a WorkOS password account
+      description: Requires an Origin matching APP_URL. Sign in afterward to verify email and create the local user.
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              $ref: '#/components/schemas/LaborGoalInput'
-      responses:
-        '201':
-          description: Labor goal created successfully.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/LaborGoal'
-        '400':
-          description: Validation error.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
-  /api/labor-goals/upload:
-    post:
-      tags:
-        - Labor Goals & Staffing
-      summary: Bulk upload labor goals via CSV (Admin only)
-      description: |
-        Allows Admins to upload a CSV file containing labor targets, hours, and roles.
-        The backend validates headers and bulk inserts/updates matching records.
-      operationId: uploadLaborGoalsCSV
-      security:
-        - BearerAuth: []
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
             schema:
               type: object
-              required:
-                - file
+              required: [email, password]
               properties:
-                file:
-                  type: string
-                  format: binary
-                  description: The CSV file containing labor goal entries.
+                email: {type: string, format: email}
+                password: {type: string, format: password}
       responses:
-        '200':
-          description: CSV file parsed and imported successfully.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CSVUploadResult'
-        '400':
-          description: Invalid CSV structure, missing columns, or bad data format.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
-  /api/labor-goals/{id}:
-    put:
-      tags:
-        - Labor Goals & Staffing
-      summary: Update a labor goal
-      description: Update target hours, headcount, or budget limit for a specific goal record.
-      operationId: updateLaborGoal
-      security:
-        - BearerAuth: []
-      parameters:
-        - name: id
-          in: path
-          required: true
-          description: The ID of the labor goal record.
-          schema:
-            type: string
-            example: "lg-101"
+        '204': {description: WorkOS account created}
+        '400': {description: Invalid details or account cannot be created}
+        '403': {description: Invalid origin}
+        '429': {description: Signup limit reached; retry after the indicated delay}
+        '503': {description: Signup temporarily unavailable}
+  /auth/password:
+    post:
+      summary: Sign in with email and password
+      description: Requires an Origin matching APP_URL. WorkOS verifies credentials; email verification may be required.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/LaborGoalInput'
+              type: object
+              required: [email, password]
+              properties:
+                email: {type: string, format: email}
+                password: {type: string, format: password}
       responses:
-        '200':
-          description: Labor goal updated successfully.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/LaborGoal'
-        '404':
-          description: Goal record not found.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
-    delete:
-      tags:
-        - Labor Goals & Staffing
-      summary: Delete a labor goal
-      description: Removes a labor goal record from the system.
-      operationId: deleteLaborGoal
-      security:
-        - BearerAuth: []
+        '204': {description: Session cookie created}
+        '202': {description: Email verification required; an encrypted challenge cookie is set}
+        '400': {description: Invalid request}
+        '401': {description: Sign-in failed or requires additional verification}
+        '403': {description: Invalid origin}
+        '429': {description: Too many attempts}
+        '503': {description: Authentication unavailable}
+  /auth/verify-email:
+    post:
+      summary: Complete email verification after password sign-in
+      description: Requires a matching Origin and the encrypted verification cookie returned by password sign-in.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: {type: string}
+      responses:
+        '204': {description: Email verified and session cookie created}
+        '401': {description: Invalid or expired challenge}
+        '403': {description: Invalid origin}
+        '503': {description: Verification temporarily unavailable}
+  /auth/forgot-password:
+    post:
+      summary: Request a password reset email
+      description: Returns the same response whether the email exists; requires a matching Origin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: {type: string, format: email}
+      responses:
+        '204': {description: Reset request accepted}
+        '400': {description: Invalid request}
+        '403': {description: Invalid origin}
+        '503': {description: Reset temporarily unavailable}
+  /auth/reset-password:
+    post:
+      summary: Set a new password using the token from the reset link
+      description: Requires a matching Origin. Successful reset invalidates local sessions.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, newPassword]
+              properties:
+                token: {type: string}
+                newPassword: {type: string, format: password}
+      responses:
+        '204': {description: Password reset completed}
+        '400': {description: Invalid token or password}
+        '403': {description: Invalid origin}
+        '503': {description: WorkOS unavailable or local session cleanup failed}
+  /auth/login:
+    get:
+      summary: Begin hosted AuthKit sign-in
+      responses:
+        '302': {description: Redirect to WorkOS}
+  /auth/callback:
+    get:
+      summary: Complete AuthKit sign-in
       parameters:
-        - name: id
-          in: path
-          required: true
-          description: The ID of the labor goal record to delete.
-          schema:
-            type: string
-            example: "lg-101"
+        - {name: code, in: query, required: true, schema: {type: string}}
+        - {name: state, in: query, required: true, schema: {type: string}}
+      responses:
+        '303': {description: Session created; redirect to application}
+        '400': {description: Invalid state}
+        '401': {description: Authentication failed}
+  /auth/me:
+    get:
+      summary: Get the current active local user
+      security: [{SessionCookie: []}]
       responses:
         '200':
-          description: Record deleted successfully.
+          description: Current user
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: "deleted"
-                  id:
-                    type: string
-                    example: "lg-101"
-        '404':
-          description: Goal record not found.
+              schema: {$ref: '#/components/schemas/User'}
+        '401': {description: Unauthenticated}
+        '403': {description: Inactive account}
+  /auth/logout:
+    post:
+      summary: End the current session
+      description: Requires an Origin header matching APP_URL.
+      security: [{SessionCookie: []}]
+      responses:
+        '204': {description: Session ended}
+        '403': {description: Invalid origin}
+        '503': {description: Local or remote logout failed}
+  /api/events:
+    get:
+      summary: List weekly Salesforce events
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: week, in: query, schema: {type: string, format: date}}
+        - {name: venueId, in: query, schema: {type: string}}
+        - {name: refresh, in: query, schema: {type: boolean}}
+      responses:
+        '200':
+          description: Weekly events
           content:
             application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
+              schema: {$ref: '#/components/schemas/WeeklyEventsResponse'}
+        '400': {description: Invalid week}
+        '401': {description: Unauthenticated}
+        '403': {description: Inactive account}
+  /api/events/{id}:
+    get:
+      summary: Get a wedding event by Salesforce ID
+      description: Loads from PostgreSQL with a fallback to Salesforce.
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Enriched wedding event
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WeddingEvent'}
+        '400': {description: Missing event ID}
+        '401': {description: Unauthenticated}
+        '403': {description: Inactive account}
+        '404': {description: Event not found}
 components:
   securitySchemes:
-    BearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
-      description: |
-        Standard JSON Web Token (JWT) carrying user claims:
-        `role` (`admin`, `gm`, `coordinator`, `staff`) and `assigned_venues` array.
-
+    SessionCookie: {type: apiKey, in: cookie, name: session}
   schemas:
-    UserProfileResponse:
+    User:
       type: object
-      required:
-        - userId
-        - name
-        - email
-        - role
-        - assignedVenues
+      required: [id, workosId, email, isActive]
       properties:
-        userId:
-          type: string
-          description: Salesforce User ID (starts with 005).
-          example: "0051P0000052FxxQAE"
-        name:
-          type: string
-          example: "Jensen Hand"
-        email:
-          type: string
-          example: "jensen.hand@wedgewoodweddings.com"
-        role:
-          type: string
-          enum: [admin, gm, coordinator, staff]
-          description: |
-            User role level:
-            - `admin`: Nationwide access across all 109 venues.
-            - `gm`: General Manager scoped to their assigned properties.
-            - `coordinator`: Day-of coordinator scoped to their venue.
-            - `staff`: Kitchen/Banquet staff.
-          example: "gm"
-        assignedVenues:
-          type: array
-          description: List of venues this user is authorized to manage.
-          items:
-            $ref: '#/components/schemas/AssignedVenue'
-
-    AssignedVenue:
-      type: object
-      required:
-        - venueId
-        - venueName
-      properties:
-        venueId:
-          type: string
-          description: Salesforce Account ID of the venue (starts with 001).
-          example: "0011P000012oMy9QAE"
-        venueName:
-          type: string
-          example: "Ken Caryl Vista"
-
+        id: {type: string, format: uuid}
+        workosId: {type: string}
+        email: {type: string, format: email}
+        isActive: {type: boolean}
     WeeklyEventsResponse:
       type: object
       required:
         - weekStart
         - weekEnd
-        - fromCache
+        - source
         - events
       properties:
         weekStart:
@@ -436,13 +206,14 @@ components:
           format: date
           description: Sunday end date of the requested week (YYYY-MM-DD).
           example: "2026-11-08"
-        fromCache:
-          type: boolean
-          description: True if response was served from Go in-memory cache; false if queried from Salesforce.
-          example: false
+        source:
+          type: string
+          enum: [database, salesforce]
+          description: Source of the returned events.
+          example: database
         events:
           type: array
-          description: List of wedding events scheduled for the week (scoped to user's permitted venues).
+          description: List of wedding events scheduled for the week.
           items:
             $ref: '#/components/schemas/WeddingEvent'
 
@@ -509,8 +280,7 @@ components:
           example: "Lakeside Arbor"
         photoBooth:
           type: boolean
-          nullable: true
-          description: Indicates whether a photo booth is booked; null means Salesforce did not provide a value.
+          description: Indicates whether a photo booth is booked for the event.
           example: true
         photoboothStaffed:
           type: boolean
@@ -697,136 +467,3 @@ components:
           items:
             type: string
           example: ["Floral Centerpieces", "Gold Charger Plates", "Lawn Games Bundle"]
-
-    LaborGoalsListResponse:
-      type: object
-      required:
-        - weekStart
-        - weekEnd
-        - goals
-      properties:
-        weekStart:
-          type: string
-          format: date
-          example: "2026-11-02"
-        weekEnd:
-          type: string
-          format: date
-          example: "2026-11-08"
-        venueId:
-          type: string
-          example: "0011P000012oMxxQAE"
-        venueName:
-          type: string
-          example: "Brittany Hill"
-        totalBudgetHours:
-          type: number
-          example: 52.5
-        totalBudgetCost:
-          type: number
-          example: 1250.00
-        goals:
-          type: array
-          items:
-            $ref: '#/components/schemas/LaborGoal'
-
-    LaborGoal:
-      type: object
-      required:
-        - id
-        - venueId
-        - eventDate
-        - role
-        - targetHours
-      properties:
-        id:
-          type: string
-          example: "lg-101"
-        venueId:
-          type: string
-          example: "0011P000012oMxxQAE"
-        venueName:
-          type: string
-          example: "Brittany Hill"
-        eventDate:
-          type: string
-          format: date
-          example: "2026-11-02"
-        role:
-          type: string
-          example: "Banquet Captain"
-        targetHeadcount:
-          type: integer
-          example: 1
-        targetHours:
-          type: number
-          example: 7.0
-        hourlyRate:
-          type: number
-          example: 30.00
-        budgetLimit:
-          type: number
-          example: 210.00
-
-    LaborGoalInput:
-      type: object
-      required:
-        - venueId
-        - eventDate
-        - role
-        - targetHours
-      properties:
-        venueId:
-          type: string
-          example: "0011P000012oMxxQAE"
-        eventDate:
-          type: string
-          format: date
-          example: "2026-11-02"
-        role:
-          type: string
-          example: "Server"
-        targetHeadcount:
-          type: integer
-          example: 3
-        targetHours:
-          type: number
-          example: 18.0
-        hourlyRate:
-          type: number
-          example: 20.00
-        budgetLimit:
-          type: number
-          example: 360.00
-
-    CSVUploadResult:
-      type: object
-      required:
-        - status
-        - insertedRows
-        - updatedRows
-      properties:
-        status:
-          type: string
-          example: "success"
-        insertedRows:
-          type: integer
-          example: 18
-        updatedRows:
-          type: integer
-          example: 4
-        errors:
-          type: array
-          items:
-            type: string
-          example: []
-
-    ErrorResponse:
-      type: object
-      required:
-        - error
-      properties:
-        error:
-          type: string
-          description: Error message description.
-          example: "Forbidden: user is not assigned to venue 0011P000012oMxxQAE"
