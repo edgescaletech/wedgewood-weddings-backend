@@ -9,6 +9,26 @@ paths:
       summary: Health check
       responses:
         '200': {description: Healthy}
+  /auth/signup:
+    post:
+      summary: Temporarily create a WorkOS password account
+      description: Requires an Origin matching APP_URL. Sign in afterward to verify email and create the local user.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: {type: string, format: email}
+                password: {type: string, format: password}
+      responses:
+        '204': {description: WorkOS account created}
+        '400': {description: Invalid details or account cannot be created}
+        '403': {description: Invalid origin}
+        '429': {description: Signup limit reached; retry after the indicated delay}
+        '503': {description: Signup temporarily unavailable}
   /auth/password:
     post:
       summary: Sign in with email and password

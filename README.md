@@ -71,9 +71,19 @@ Go HTTP API for the venue scheduling prototype. Salesforce provides event data; 
 
 1. Navigate the browser to `GET /auth/login` on the backend. It redirects to the hosted WorkOS AuthKit sign-in page.
 2. WorkOS redirects to `GET /auth/callback`. The backend checks OAuth state, exchanges the code, verifies the access token, and links the user by their immutable WorkOS user ID.
-3. The backend creates an inactive local user if one does not already exist, establishes a session, and redirects the browser to `APP_URL`.
-4. A privately authorized operator must activate a new local user before protected endpoints can be used. See [Activate a user](#activate-a-user).
+3. The backend creates an active local user if one does not already exist, establishes a session, and redirects the browser to `APP_URL`. Existing users retain their current active status.
+4. Inactive existing users must be activated by a privately authorized operator. See [Activate a user](#activate-a-user).
 5. The frontend can call `GET /auth/me` with credentials to retrieve the active local identity.
+
+### Temporary signup
+
+Open `/signup/` on the frontend to create an account. The page sends email and password to `POST /auth/signup`, which creates an unverified WorkOS user. The password is handled by WorkOS and is not saved in PostgreSQL. After signup, sign in using the existing login page; WorkOS can require email verification, and the local user is created on the first successful sign-in.
+
+To disable signup later, remove the `/auth/signup` route in `cmd/server/main.go` and deploy the backend; deleting the frontend page alone does not disable the API. Then remove the signup handler, rate limiter, tests and OpenAPI entry, the frontend `signup/` directory, and its entry in `vite.config.js`.
+
+Signup is limited to 30 POST requests per 10 minutes per server process using an in-memory counter. A full window returns `429` with `Retry-After`. The counter resets on restart and is not shared between instances. It does not distinguish clients, so one busy or abusive client can temporarily block everyone on that instance. Use a trusted edge per-IP rate limiter for public deployment.
+
+New users are temporarily created active by the `INSERT INTO users` statement in `internal/auth/login.go`. To restore inactive-by-default behavior, change its `is_active` value from `TRUE` to `FALSE` (or omit `is_active` and its value if the database column default is false). This affects future users only and does not deactivate existing accounts. No migration is needed for the explicit value; the existing migration's default remains false.
 
 ### Custom sign-in, verification, and password recovery
 
@@ -84,7 +94,7 @@ The custom frontend can submit JSON to the following endpoints. All requests mus
 3. `POST /auth/forgot-password` with `{"email":"..."}` requests a WorkOS reset email. The `204` response does not reveal whether the account exists.
 4. The frontend reset page reads the one-time `token` from the email link and sends it to `POST /auth/reset-password` as `{"token":"...","newPassword":"..."}`. A successful response returns `204`. WorkOS revokes its sessions and the backend deletes local sessions for that user; the user must sign in again.
 
-In WorkOS, enable the email verification and password reset emails, and configure the password reset URL under **Applications → your application → Redirects** to point to the frontend reset page. That page must capture the `token` query parameter and should remove it from the address bar after reading it. Do not log or send tokens to analytics. The frontend still needs to implement the verification and reset screens. WorkOS applies its password policy and sends emails; this backend does not store passwords or send emails itself. WorkOS MFA, SSO, and Radar challenges are not implemented in the custom flow. Configure appropriate per-IP abuse protection before public deployment.
+In WorkOS, enable the email verification and password reset emails, and configure the password reset URL under **Applications → your application → Redirects** to point to the frontend reset page. That page captures the `token` query parameter and removes it from the address bar after reading it. Do not log or send tokens to analytics. WorkOS applies its password policy and sends emails; this backend does not store passwords or send emails itself. WorkOS MFA, SSO, and Radar challenges are not implemented in the custom flow. Configure appropriate per-IP abuse protection before public deployment.
 
 If WorkOS resets the password but PostgreSQL session cleanup fails, the endpoint returns `503` explaining that the password changed. Local sessions may remain usable until their access tokens expire; an operator must remove that user's local sessions. This cross-service failure requires operational attention.
 
@@ -100,7 +110,7 @@ Session cookies use `SameSite=Lax`, so this setup does not support cross-site fr
 
 ## Activate a user
 
-New users have `is_active = false` and cannot access protected endpoints. An authorized operator with private database access should verify the complete WorkOS ID before running:
+New users are currently active by default. Existing inactive users cannot access protected endpoints. An authorized operator with private database access should verify the complete WorkOS ID before activating an account:
 
 ```sql
 SELECT workos_id, email, is_active FROM users;
@@ -118,6 +128,7 @@ Copy the complete ID, not a truncated value from a table display. There is no pu
 | Route | Purpose | Access |
 | --- | --- | --- |
 | `GET /healthz` | Health check | Public |
+| `POST /auth/signup` | Temporarily create a WorkOS password account | Public; matching `Origin` required |
 | `POST /auth/password` | Sign in with email and password | Public; matching `Origin` required |
 | `POST /auth/verify-email` | Complete an email verification challenge | Public; challenge cookie and matching `Origin` required |
 | `POST /auth/forgot-password` | Request a reset email | Public; matching `Origin` required |
@@ -141,7 +152,7 @@ Logout removes the local session and attempts to revoke the WorkOS session, incl
 
 When WorkOS refresh or signing-key retrieval is temporarily unavailable, protected requests return `503` and preserve the local session for a later retry. An explicit `invalid_grant` refresh response returns `401`. Rotated refresh tokens are saved before the replacement access token is verified, but access is denied until verification succeeds.
 
-**Authorization and RBAC are not implemented.** All active users can currently request event data for every venue, including by changing the `venueId` filter. Do not use this prototype to protect sensitive production data until authorization is implemented. ADP and scheduling workflows remain under design.
+**Authorization and RBAC are not implemented.** Authenticated active users can request event data for every venue, including by changing the `venueId` filter. Do not use this prototype to protect sensitive production data until authorization is implemented. ADP and scheduling workflows remain under design.
 
 ## Salesforce Pub/Sub subscriber
 

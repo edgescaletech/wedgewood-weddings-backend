@@ -120,10 +120,10 @@ func (server *Server) createSession(writer http.ResponseWriter, request *http.Re
 	}
 
 	defer transaction.Rollback()
-	// A new user receives the database default (inactive); existing activation is preserved.
+	// Temporarily activate new users; the conflict update preserves existing status.
 	_, err = transaction.ExecContext(
 		request.Context(),
-		`INSERT INTO users (id,workos_id,email) VALUES ($1,$2,$3)
+		`INSERT INTO users (id,workos_id,email,is_active) VALUES ($1,$2,$3,TRUE)
    ON CONFLICT (workos_id) DO UPDATE SET email=EXCLUDED.email, updated_at=now()`,
 		uuid.NewString(),
 		c.Subject,

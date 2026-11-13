@@ -299,13 +299,15 @@ func main() {
 	// Pure API routes
 	mux.HandleFunc("/healthz", healthzHandler)
 
-	// mux.Handle("/api/events", authServer.Middleware(eventsHandler(db, sf)))
-	// mux.Handle("/api/events/", authServer.Middleware(eventByIDHandler(db, sf)))
-	mux.HandleFunc("/api/events", eventsHandler(db, sf))
-	mux.HandleFunc("/api/events/", eventByIDHandler(db, sf))
+	mux.Handle("/api/events", authServer.Middleware(eventsHandler(db, sf)))
+	mux.Handle("/api/events/", authServer.Middleware(eventByIDHandler(db, sf)))
 
 	mux.HandleFunc("/auth/login", authServer.Login)
 	mux.HandleFunc("/auth/password", authServer.PasswordLogin)
+
+	// Temporary signup endpoint; remove this route to disable account creation.
+	mux.Handle("/auth/signup", authServer.SignupRateLimit(http.HandlerFunc(authServer.Signup)))
+
 	mux.HandleFunc("/auth/verify-email", authServer.VerifyEmail)
 	mux.HandleFunc("/auth/forgot-password", authServer.ForgotPassword)
 	mux.HandleFunc("/auth/reset-password", authServer.ResetPassword)
