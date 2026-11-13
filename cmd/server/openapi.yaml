@@ -21,6 +21,25 @@ paths:
         '200': {description: User list}
         '401': {description: Authentication required}
         '403': {description: Permission denied}
+    post:
+      summary: Provision inactive WorkOS and local user (users.manage)
+      description: Requires matching Origin. Creates an unverified WorkOS identity with an initial password and an inactive local user. No invitation is sent.
+      security: [{SessionCookie: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, displayName, password]
+              properties:
+                email: {type: string, format: email}
+                displayName: {type: string}
+                password: {type: string, format: password, writeOnly: true, maxLength: 1024}
+      responses:
+        '204': {description: User provisioned}
+        '403': {description: Forbidden}
+        '503': {description: Provisioning unavailable; reconciliation may be required}
   /api/admin/users/{id}:
     get:
       summary: Get user and assigned roles (users.view)
@@ -30,6 +49,26 @@ paths:
       responses:
         '200': {description: User details}
         '404': {description: User not found}
+    patch:
+      summary: Update local display name (users.manage)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [displayName], properties: {displayName: {type: string}}}
+      responses:
+        '204': {description: Updated}
+    delete:
+      summary: Archive a user and remove local sessions (users.manage)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '204': {description: Archived}
+        '409': {description: Last administrator would be removed}
   /api/admin/roles:
     get:
       summary: List predefined roles and current permissions (roles.view)
@@ -52,6 +91,20 @@ paths:
         - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
       responses:
         '200': {description: Role and permissions}
+    put:
+      summary: Replace role permissions (roles.manage)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [permissions], properties: {permissions: {type: array, items: {type: string}}}}
+      responses:
+        '204': {description: Updated}
+        '403': {description: Forbidden}
+        '409': {description: Last administrator protection}
   /api/admin/permissions:
     get:
       summary: List permission definitions (roles.view)
@@ -72,6 +125,99 @@ paths:
         - {name: id, in: path, required: true, schema: {type: string}}
       responses:
         '200': {description: Venue details}
+  /api/admin/users/{id}/activate:
+    post:
+      summary: Activate a local user (users.manage)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '204': {description: Activated}
+  /api/admin/users/{id}/deactivate:
+    post:
+      summary: Deactivate a user and remove local sessions (users.manage)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '204': {description: Deactivated}
+        '409': {description: Last administrator protection}
+  /api/admin/users/{id}/roles:
+    get:
+      summary: List assigned roles (users.view)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200': {description: Assignments}
+    post:
+      summary: Assign a predefined role (roles.assign and venues.manage_access for venue roles)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [roleId], properties: {roleId: {type: string, format: uuid}, venueId: {type: string, nullable: true}}}
+      responses:
+        '204': {description: Assigned}
+  /api/admin/users/{id}/roles/{assignmentId}:
+    delete:
+      summary: Remove a role assignment (roles.assign)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: assignmentId, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '204': {description: Removed}
+        '409': {description: Last administrator protection}
+  /api/admin/users/{id}/permissions:
+    get:
+      summary: Show inherited, override and effective permissions (users.view)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: venueId, in: query, schema: {type: string}}
+      responses:
+        '200': {description: Permission breakdown}
+  /api/admin/users/{id}/permissions/overrides:
+    get:
+      summary: List user overrides (users.view)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200': {description: Overrides}
+    put:
+      summary: Set a user override (users.manage_permissions)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [permission, effect], properties: {permission: {type: string}, effect: {type: string, enum: [allow, deny]}, venueId: {type: string, nullable: true}}}
+      responses:
+        '204': {description: Override saved}
+  /api/admin/users/{id}/permissions/overrides/{overrideId}:
+    delete:
+      summary: Remove a user override (users.manage_permissions)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: overrideId, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '204': {description: Override removed}
+  /api/admin/venues/{id}/users:
+    get:
+      summary: List venue role assignments (venues.manage_access)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Venue users}
   /auth/signup:
     post:
       summary: Temporarily create a WorkOS password account

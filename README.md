@@ -71,7 +71,11 @@ Go HTTP API for the venue scheduling prototype. Salesforce provides event data; 
 
 ### Admin management status
 
-The Admin Management backend is **incomplete**. The current implementation includes the RBAC schema, permission resolver, one-time bootstrap command, and protected read-only user, role, permission and venue endpoints. Administrative mutations, final-admin lockout protections, full audit coverage, and the remaining endpoint/test coverage are not implemented. Do not deploy this as a complete admin platform.
+Admin endpoints require an active session and the relevant global permission. Mutations require an `Origin` matching `APP_URL`, and JSON bodies where applicable. They serialize privileged changes, recheck the actor's permissions, write an audit record in the same transaction, and reject changes that leave no active administrator with all management permissions. Users cannot modify their own privileged assignments or overrides. An actor can grant only permissions they currently hold.
+
+`POST /api/admin/users` accepts `email`, `displayName`, and `password`, creates an unverified WorkOS identity with that password, and creates an inactive local user. WorkOS stores the password; PostgreSQL stores the linked identity and application details. The full display name is also sent as the WorkOS first name because the installed SDK exposes separate first and last name fields. No invitation is sent. If WorkOS creation succeeds but the local transaction fails, a WorkOS identity may remain without a local record; an operator must reconcile it in WorkOS before retrying. `PATCH /api/admin/users/{id}` updates the local `displayName`; WorkOS controls identity details. `DELETE` archives the account locally and removes its local sessions; it does not delete the WorkOS identity. An archived account cannot be reactivated through the API.
+
+Role assignments use `POST /api/admin/users/{id}/roles` with `roleId` and optional `venueId`; removal uses `DELETE /api/admin/users/{id}/roles/{assignmentId}`. Replace a role's mapping with `PUT /api/admin/roles/{id}/permissions` and `{"permissions":["schedules.view"]}`. Set an override with `PUT /api/admin/users/{id}/permissions/overrides` and `{"permission":"schedules.approve","effect":"allow","venueId":"SALESFORCE_VENUE_ID"}`; use `null` for global scope. Remove an override with `DELETE /api/admin/users/{id}/permissions/overrides/{overrideId}`. The corresponding GET endpoints return roles, overrides and effective permissions; effective permissions accept an optional `venueId` query parameter. Removing the last role for a scope also removes its overrides and records them in the audit entry.
 
 After applying migration 003, an operator can bootstrap one administrator. The user must already have a local account from WorkOS sign-in, a verified WorkOS email, and an active membership in the configured WorkOS organization with the configured bootstrap role. Set `WORKOS_API_KEY`, `DATABASE_URL`, `BOOTSTRAP_WORKOS_USER_ID`, `BOOTSTRAP_WORKOS_ORGANIZATION_ID`, and `BOOTSTRAP_WORKOS_ROLE_SLUG` in the operator's environment, then run `go run ./cmd/bootstrap-admin`. The command verifies WorkOS directly, activates that existing local user, assigns the global Admin role, writes an audit record, and records a one-time marker. Do not expose the command or credentials to users. Following bootstrap, permission checks use PostgreSQL.
 
@@ -79,7 +83,7 @@ Existing venue identifiers are Salesforce text IDs, not UUIDs. A permission chec
 
 1. Navigate the browser to `GET /auth/login` on the backend. It redirects to the hosted WorkOS AuthKit sign-in page.
 2. WorkOS redirects to `GET /auth/callback`. The backend checks OAuth state, exchanges the code, verifies the access token, and links the user by their immutable WorkOS user ID.
-3. The backend creates an active local user if one does not already exist, establishes a session, and redirects the browser to `APP_URL`. Existing users retain their current active status.
+3. The backend creates an inactive local user if one does not already exist, establishes a session, and redirects the browser to `APP_URL`. Existing users retain their current active status.
 4. Inactive existing users must be activated by a privately authorized operator. See [Activate a user](#activate-a-user).
 5. The frontend can call `GET /auth/me` with credentials to retrieve the active local identity.
 
@@ -89,9 +93,9 @@ Open `/signup/` on the frontend to create an account. The page sends email and p
 
 To disable signup later, remove the `/auth/signup` route in `cmd/server/main.go` and deploy the backend; deleting the frontend page alone does not disable the API. Then remove the signup handler, rate limiter, tests and OpenAPI entry, the frontend `signup/` directory, and its entry in `vite.config.js`.
 
-Signup is limited to 30 POST requests per 10 minutes per server process using an in-memory counter. A full window returns `429` with `Retry-After`. The counter resets on restart and is not shared between instances. It does not distinguish clients, so one busy or abusive client can temporarily block everyone on that instance. Use a trusted edge per-IP rate limiter for public deployment.
+Signup is limited to 15 POST requests per 10 minutes per server process using an in-memory counter. A full window returns `429` with `Retry-After`. The counter resets on restart and is not shared between instances. It does not distinguish clients, so one busy or abusive client can temporarily block everyone on that instance. Use a trusted edge per-IP rate limiter for public deployment.
 
-New users are temporarily created active by the `INSERT INTO users` statement in `internal/auth/login.go`. To restore inactive-by-default behavior, change its `is_active` value from `TRUE` to `FALSE` (or omit `is_active` and its value if the database column default is false). This affects future users only and does not deactivate existing accounts. No migration is needed for the explicit value; the existing migration's default remains false.
+New local users are created inactive. An authorized administrator must activate them and assign the appropriate role and venue before they receive Admin API access. Existing users retain their current active status.
 
 ### Custom sign-in, verification, and password recovery
 
@@ -118,7 +122,7 @@ Session cookies use `SameSite=Lax`, so this setup does not support cross-site fr
 
 ## Activate a user
 
-New users are currently active by default. Existing inactive users cannot access protected endpoints. An authorized operator with private database access should verify the complete WorkOS ID before activating an account:
+New users are inactive by default and cannot access protected endpoints. An administrator can activate users through the protected Admin API. An authorized operator with private database access can also verify the complete WorkOS ID before activating an account:
 
 ```sql
 SELECT workos_id, email, is_active FROM users;
@@ -129,7 +133,7 @@ WHERE workos_id = 'user_verified_workos_id'
 RETURNING workos_id, email, is_active;
 ```
 
-Copy the complete ID, not a truncated value from a table display. There is no public activation endpoint. A protected request returns `401` without a valid session and `403` for an inactive local account.
+Copy the complete ID, not a truncated value from a table display. Activation requires an authorized Admin API session or private database access. A protected request returns `401` without a valid session and `403` for an inactive local account.
 
 ## API routes
 
@@ -183,12 +187,21 @@ go build ./...
 
 Unit tests mock WorkOS and database calls. A real end-to-end test requires configured PostgreSQL, WorkOS credentials, and a registered redirect URI. Keep credentials in `.env` locally or in your deployment secret manager, never in source control.
 
+Set `RBAC_TEST_DATABASE_URL` to a disposable PostgreSQL database to run the optional integration tests. They create uniquely named temporary schemas, apply migrations there, and remove those schemas after the tests.
+
 ## Database-backed event synchronization
 
 Weekly and individual event requests use the PostgreSQL event cache when available and fall back to Salesforce. The background Salesforce Pub/Sub subscriber starts with the API and updates the database. Apply migrations before starting the service. Render auto-deploy is disabled; deploy only after migrations succeed.
 
-Migration version 1 creates event tables; version 2 creates authentication tables. The version 2 down migration **deletes all local users and sessions**. Back up the database before rolling back, and only use it when those tables were introduced by version 2.
+Migration version 1 creates event tables; version 2 creates authentication tables; version 3 creates RBAC and audit tables; version 4 adds local display names and archival state. The version 2 down migration **deletes all local users and sessions**, and the historical version 3 rollback is destructive. Version 5 prevents rollback from reaching it and protects the bootstrap and audit tables with a database dependency.
 
 Older databases that ran the authentication branch's original version 1 instead of `dev`'s version 1 must apply `internal/migrations/001_phase1_tables.up.sql` manually before upgrading. Those databases may already have user tables that predate version 2, so do not run the version 2 down migration on them without a reviewed recovery plan.
 
 `CREATE TABLE IF NOT EXISTS` does not repair an existing table with a different definition. Inspect unexpected schemas before applying migrations. The version 1 down migration drops event-related tables and their data; do not use it against a database containing data you need.
+
+
+Migration 005 preserves permanent bootstrap and audit history and makes assignment IDs, users, roles, and venues immutable through SQL UPDATE. Use the protected Admin assignment removal and creation endpoints to change access. Removal still checks effective permissions after override cleanup; changes that would restore a denied permission are rejected and rolled back.
+
+Migration 005 is intentionally irreversible. Roll back application code while retaining the database schema. Its down migration raises an error; the historical 003 down script is also blocked by a view dependency on the security history tables. Do not drop that view, use CASCADE, or force the migration version backwards to bypass protection. A database owner can bypass database safeguards and must follow operator access controls.
+
+If rollback of migration 005 is attempted, golang-migrate records its target version (4) as dirty before the guard raises an error; the version 5 schema remains intact. Stop migrations and inspect the schema and migration version. After confirming 005's guard view, immutable-assignment trigger, bootstrap marker, and audit data are intact, an authorized operator can mark **version 5** clean with golang-migrate's `force 5` and resume forward migrations. This is version metadata recovery, not rollback. For any broader recovery, take a verified backup and use a separately reviewed restore plan that preserves the permanent bootstrap marker, all audit records, and assignments/overrides; do not run destructive historical down scripts or reset bootstrap.
