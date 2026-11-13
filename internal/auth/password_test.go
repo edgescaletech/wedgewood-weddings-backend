@@ -53,7 +53,7 @@ func TestPasswordLoginCreatesSession(t *testing.T) {
 		},
 	}
 	mock.ExpectBegin()
-	mock.ExpectExec("INSERT INTO users").WithArgs(sqlmock.AnyArg(), "user_1", "a@example.com").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO users .*FALSE").WithArgs(sqlmock.AnyArg(), "user_1", "a@example.com").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO auth_sessions").WithArgs(sqlmock.AnyArg(), "user_1", sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	request := httptest.NewRequest(http.MethodPost, "/auth/password", strings.NewReader(`{"email":"a@example.com","password":"secret"}`))
