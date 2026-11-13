@@ -39,18 +39,20 @@ func (server *Server) Logout(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 
-	// Clear the browser cookie and, when possible, revoke the WorkOS session.
+	// Local access ends immediately. The sealed session is authenticated with our
+	// encryption key, so its session ID can be used for revocation even when the
+	// access token has expired. It is never used to authenticate a request here.
 	server.cookie(writer, "session", "", -1)
 	if err == nil {
-		data, refreshErr := workos.Unseal[workos.SessionData](sealed, server.config.CookiePassword)
-		if refreshErr == nil {
-			c, refreshErr := server.verify(request.Context(), data.AccessToken)
-			if refreshErr == nil {
-				if server.provider.Revoke(request.Context(), c.SessionID) != nil {
-					fail(writer, 503, "local session ended; remote logout failed")
-					return
-				}
-			}
+		session := workos.NewSession(nil, sealed, server.config.CookiePassword)
+		result, sessionErr := session.Authenticate()
+		if sessionErr != nil || result == nil || !result.Authenticated || result.SessionID == "" {
+			fail(writer, http.StatusServiceUnavailable, "local session ended; remote logout failed")
+			return
+		}
+		if server.provider.Revoke(request.Context(), result.SessionID) != nil {
+			fail(writer, http.StatusServiceUnavailable, "local session ended; remote logout failed")
+			return
 		}
 	}
 

@@ -90,57 +90,88 @@ func (server *Server) session(writer http.ResponseWriter, request *http.Request)
 		return user, false
 	}
 
-	c, err := server.verify(request.Context(), data.AccessToken)
+	// Never refresh a session whose encrypted identity disagrees with its local user.
+	if data.User.ID != user.WorkOSID {
+		fail(writer, http.StatusUnauthorized, "invalid session")
+		return user, false
+	}
 
-	// Expired access tokens must be refreshed and the replacement verified.
-	if err != nil && errors.Is(err, jwt.ErrTokenExpired) {
-
+	claims, verifyErr := server.verify(request.Context(), data.AccessToken)
+	if errors.Is(verifyErr, jwt.ErrTokenExpired) {
 		response, refreshErr := server.provider.Refresh(request.Context(), data.RefreshToken)
-		if refreshErr != nil || response == nil || response.User == nil || response.RefreshToken == "" {
-			fail(writer, 401, "session expired")
-			return user, false
-		}
-
-		// Check the replacement token and ensure it belongs to the same local user.
-		c, refreshErr = server.verify(request.Context(), response.AccessToken)
-		if refreshErr != nil || c.Subject != user.WorkOSID || response.User.ID != user.WorkOSID {
-			fail(writer, 401, "invalid session")
-			return user, false
-		}
-
-		sealed, refreshErr = workos.SealSessionFromAuthResponse(
-			response.AccessToken,
-			response.RefreshToken,
-			response.User,
-			response.Impersonator,
-			server.config.CookiePassword,
-		)
-
 		if refreshErr != nil {
-			fail(writer, 503, "authentication unavailable")
+			// WorkOS invalid_grant is terminal. Timeouts, 429s and upstream errors
+			// keep the current session so a later request can retry.
+			if isInvalidGrant(refreshErr) {
+				fail(writer, http.StatusUnauthorized, "session expired")
+			} else {
+				fail(writer, http.StatusServiceUnavailable, "authentication temporarily unavailable")
+			}
+			return user, false
+		}
+		if response == nil || response.User == nil || response.User.ID != user.WorkOSID ||
+			response.AccessToken == "" || response.RefreshToken == "" {
+			fail(writer, http.StatusUnauthorized, "invalid session")
 			return user, false
 		}
 
-		// Persist the rotated tokens while the session row remains locked.
-		if _, refreshErr = transaction.ExecContext(request.Context(), `UPDATE auth_sessions SET sealed_session=$1 WHERE id_hash=$2`, sealed, sessionHash[:]); refreshErr != nil {
-			fail(writer, 503, "authentication unavailable")
+		// A successful refresh rotates the token. Persist it before fetching JWKS
+		// or validating claims, but never grant access until verification succeeds.
+		sealed, err = workos.SealSessionFromAuthResponse(
+			response.AccessToken, response.RefreshToken, response.User,
+			response.Impersonator, server.config.CookiePassword,
+		)
+		if err != nil {
+			fail(writer, http.StatusServiceUnavailable, "authentication temporarily unavailable")
 			return user, false
 		}
-		err = nil
+		if _, err = transaction.ExecContext(request.Context(), `UPDATE auth_sessions SET sealed_session=$1 WHERE id_hash=$2`, sealed, sessionHash[:]); err != nil {
+			fail(writer, http.StatusServiceUnavailable, "authentication temporarily unavailable")
+			return user, false
+		}
+		if err = transaction.Commit(); err != nil {
+			fail(writer, http.StatusServiceUnavailable, "authentication temporarily unavailable")
+			return user, false
+		}
+
+		claims, verifyErr = server.verify(request.Context(), response.AccessToken)
+		if verifyErr != nil || claims.Subject != user.WorkOSID {
+			if errors.Is(verifyErr, errJWKSUnavailable) {
+				fail(writer, http.StatusServiceUnavailable, "authentication temporarily unavailable")
+			} else {
+				fail(writer, http.StatusUnauthorized, "invalid session")
+			}
+			return user, false
+		}
+		return user, true
 	}
 
-	// The verified token, encrypted user and local record must identify the same user.
-	if err != nil || c.Subject != user.WorkOSID || data.User.ID != user.WorkOSID {
-		fail(writer, 401, "invalid session")
+	if verifyErr != nil {
+		if errors.Is(verifyErr, errJWKSUnavailable) {
+			fail(writer, http.StatusServiceUnavailable, "authentication temporarily unavailable")
+		} else {
+			fail(writer, http.StatusUnauthorized, "invalid session")
+		}
 		return user, false
 	}
-
-	// Commit any refreshed tokens before allowing the request to proceed.
+	if claims.Subject != user.WorkOSID {
+		fail(writer, http.StatusUnauthorized, "invalid session")
+		return user, false
+	}
 	if transaction.Commit() != nil {
-		fail(writer, 503, "authentication unavailable")
+		fail(writer, http.StatusServiceUnavailable, "authentication temporarily unavailable")
 		return user, false
 	}
+
 	return user, true
+}
+
+// isInvalidGrant identifies the explicit WorkOS response for a revoked or
+// expired refresh token. Other errors preserve the session for a later retry.
+func isInvalidGrant(err error) bool {
+	var apiError *workos.APIError
+	return errors.As(err, &apiError) && apiError.StatusCode == http.StatusBadRequest &&
+		(apiError.Code == "invalid_grant" || apiError.ErrorCode == "invalid_grant")
 }
 
 // Middleware checks the session and adds the authenticated identity to the request.

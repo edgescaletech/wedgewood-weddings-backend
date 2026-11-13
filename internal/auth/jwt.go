@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"sync"
@@ -21,6 +22,8 @@ type claims struct {
 	SessionID string `json:"sid"`
 	jwt.RegisteredClaims
 }
+
+var errJWKSUnavailable = errors.New("WorkOS signing keys unavailable")
 
 // verifier retrieves WorkOS signing keys and keeps them briefly in memory.
 // The mutex protects both the cached keys and their fetch timestamp.
@@ -111,17 +114,17 @@ func (tokenVerifier *verifier) key(ctx context.Context, keyID string) (*rsa.Publ
 	}
 	response, err := tokenVerifier.client.Do(request)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", errJWKSUnavailable, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, errors.New("JWKS unavailable")
+		return nil, errJWKSUnavailable
 	}
 
 	// Limit the response size before decoding an external service's JSON.
 	var keySet jwksResponse
 	if err := json.NewDecoder(http.MaxBytesReader(nil, response.Body, 1<<20)).Decode(&keySet); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: invalid key set", errJWKSUnavailable)
 	}
 	// Convert eligible RSA signing keys from JWKS into Go public keys.
 	publicKeys := make(map[string]*rsa.PublicKey)

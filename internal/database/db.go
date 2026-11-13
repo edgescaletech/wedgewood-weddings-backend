@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -8,8 +9,13 @@ import (
 	_ "github.com/lib/pq"
 )
 
-// Connect opens a PostgreSQL connection pool and verifies it with Ping.
+// Connect opens a PostgreSQL connection pool without a caller-provided context.
 func Connect(databaseURL string) (*sql.DB, error) {
+	return Open(context.Background(), databaseURL)
+}
+
+// Open creates the PostgreSQL connection pool and checks it using the provided context.
+func Open(ctx context.Context, databaseURL string) (*sql.DB, error) {
 	if databaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is empty")
 	}
@@ -23,7 +29,7 @@ func Connect(databaseURL string) (*sql.DB, error) {
 	db.SetMaxIdleConns(10)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping db: %w", err)
 	}

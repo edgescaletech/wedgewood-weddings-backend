@@ -120,7 +120,9 @@ For events, the optional `venueId` query parameter filters results and `refresh=
 
 The browser holds an opaque `HttpOnly`, `SameSite=Lax` session cookie. WorkOS session data is encrypted in PostgreSQL, and access tokens are verified against WorkOS signing keys. Expired access tokens can be refreshed; the local session has a 24-hour expiry. Changing `WORKOS_COOKIE_PASSWORD` invalidates existing encrypted sessions. Local account deactivation takes effect on the next protected request.
 
-Logout removes the local session and attempts to revoke the WorkOS session when its access token can be verified. A `503` during revocation indicates that the local session ended but remote revocation failed; remote revocation is not guaranteed when the stored token cannot be verified.
+Logout removes the local session and attempts to revoke the WorkOS session, including when the access token has expired. A `503` indicates that the local session ended but remote revocation failed or could not be attempted; the WorkOS session may need to be revoked in the dashboard.
+
+When WorkOS refresh or signing-key retrieval is temporarily unavailable, protected requests return `503` and preserve the local session for a later retry. An explicit `invalid_grant` refresh response returns `401`. Rotated refresh tokens are saved before the replacement access token is verified, but access is denied until verification succeeds.
 
 **Authorization and RBAC are not implemented.** All active users can currently request event data for every venue, including by changing the `venueId` filter. Do not use this prototype to protect sensitive production data until authorization is implemented. ADP and scheduling workflows remain under design.
 
@@ -149,4 +151,6 @@ Unit tests mock WorkOS and database calls. A real end-to-end test requires confi
 
 Weekly and individual event requests use the PostgreSQL event cache when available and fall back to Salesforce. The background Salesforce Pub/Sub subscriber starts with the API and updates the database. Apply migrations before starting the service. Render auto-deploy is disabled; deploy only after migrations succeed.
 
-Migration version 2 reconciles databases that previously applied either branch's version 1 migration. Back up the database before applying it and do not reset migration versions manually.
+Migration version 2 reconciles databases that previously applied either branch's version 1 migration. Back up the database before applying it and do not reset migration versions manually. Migration 2 is **forward-only**: its schema may include tables that predate the merge, so automatically dropping those tables could destroy existing data. `make migration.down` and direct CLI rollback are blocked by the version 2 down SQL; golang-migrate marks a failed rollback as dirty. If either rollback command is attempted, stop and inspect the database and migration state before recovery. Restore a verified backup if a rollback is required.
+
+`CREATE TABLE IF NOT EXISTS` makes reconciliation safe for the expected version 1 schemas from both branches, but it does not repair an existing table with a different definition. Inspect unexpected schemas before applying migrations. The version 1 down migration drops event-related tables and their data; do not use it against a database containing data you need.
