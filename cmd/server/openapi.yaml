@@ -91,6 +91,23 @@ paths:
         '400': {description: Invalid week}
         '401': {description: Unauthenticated}
         '403': {description: Inactive account}
+  /api/events/{id}:
+    get:
+      summary: Get a wedding event by Salesforce ID
+      description: Loads from PostgreSQL with a fallback to Salesforce.
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Enriched wedding event
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WeddingEvent'}
+        '400': {description: Missing event ID}
+        '401': {description: Unauthenticated}
+        '403': {description: Inactive account}
+        '404': {description: Event not found}
 components:
   securitySchemes:
     SessionCookie: {type: apiKey, in: cookie, name: session}
@@ -108,7 +125,7 @@ components:
       required:
         - weekStart
         - weekEnd
-        - fromCache
+        - source
         - events
       properties:
         weekStart:
@@ -121,10 +138,11 @@ components:
           format: date
           description: Sunday end date of the requested week (YYYY-MM-DD).
           example: "2026-11-08"
-        fromCache:
-          type: boolean
-          description: True if response was served from Go in-memory cache; false if queried from Salesforce.
-          example: false
+        source:
+          type: string
+          enum: [database, salesforce]
+          description: Source of the returned events.
+          example: database
         events:
           type: array
           description: List of wedding events scheduled for the week.

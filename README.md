@@ -109,11 +109,12 @@ Copy the complete ID, not a truncated value from a table display. There is no pu
 | `GET /auth/callback` | Complete the WorkOS sign-in flow | Public; validates OAuth state |
 | `GET /auth/me`, `GET /api/auth/me` | Current local user | Active session required |
 | `POST /auth/logout` | Remove local session and attempt WorkOS session revocation | Requires session cookie and matching `Origin` |
-| `GET /api/events?week=YYYY-MM-DD` | Salesforce event data for a week | Active session required |
+| `GET /api/events?week=YYYY-MM-DD` | Event data for a week | Active session required |
+| `GET /api/events/{id}` | Event details | Active session required |
 | `GET /docs` | Swagger UI | Public |
 | `GET /openapi.yaml` | API specification | Public |
 
-For events, the optional `venueId` query parameter filters results and `refresh=true` bypasses the five-minute in-memory cache. The `week` date identifies a week; results cover Monday through Sunday.
+For events, the optional `venueId` query parameter filters results and `refresh=true` requests fresh data from Salesforce. The `week` date identifies a week; results cover Monday through Sunday.
 
 ## Sessions and access
 
@@ -143,3 +144,9 @@ go build ./...
 ```
 
 Unit tests mock WorkOS and database calls. A real end-to-end test requires configured PostgreSQL, WorkOS credentials, and a registered redirect URI. Keep credentials in `.env` locally or in your deployment secret manager, never in source control.
+
+## Database-backed event synchronization
+
+Weekly and individual event requests use the PostgreSQL event cache when available and fall back to Salesforce. The background Salesforce Pub/Sub subscriber starts with the API and updates the database. Apply migrations before starting the service. Render auto-deploy is disabled; deploy only after migrations succeed.
+
+Migration version 2 reconciles databases that previously applied either branch's version 1 migration. Back up the database before applying it and do not reset migration versions manually.

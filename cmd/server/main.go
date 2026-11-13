@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -11,12 +12,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"wedding-project/internal/adapters/salesforce"
 	"wedding-project/internal/auth"
 	"wedding-project/internal/database"
+	"wedding-project/internal/pubsub"
+	"wedding-project/internal/repositories"
 )
 
 //go:embed openapi.yaml
@@ -90,58 +92,6 @@ func weekBounds(weekParam string) (start, end time.Time, err error) {
 }
 
 // ---------------------------------------------------------------------------
-// In-memory response cache (5-minute TTL per week key)
-// Prevents repeated Salesforce API calls for the same week.
-// ---------------------------------------------------------------------------
-
-type cacheEntry struct {
-	events   []salesforce.Event
-	cachedAt time.Time
-}
-
-type eventCache struct {
-	mu      sync.RWMutex
-	entries map[string]cacheEntry
-	ttl     time.Duration
-}
-
-func newEventCache(ttl time.Duration) *eventCache {
-	c := &eventCache{
-		entries: make(map[string]cacheEntry),
-		ttl:     ttl,
-	}
-	// Background goroutine purges stale entries every 10 minutes
-	go func() {
-		for range time.Tick(10 * time.Minute) {
-			c.mu.Lock()
-			for k, v := range c.entries {
-				if time.Since(v.cachedAt) > c.ttl {
-					delete(c.entries, k)
-				}
-			}
-			c.mu.Unlock()
-		}
-	}()
-	return c
-}
-
-func (c *eventCache) get(key string) ([]salesforce.Event, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	entry, ok := c.entries[key]
-	if !ok || time.Since(entry.cachedAt) > c.ttl {
-		return nil, false
-	}
-	return entry.events, true
-}
-
-func (c *eventCache) set(key string, events []salesforce.Event) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.entries[key] = cacheEntry{events: events, cachedAt: time.Now()}
-}
-
-// ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
@@ -193,7 +143,7 @@ func docsHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(html))
 }
 
-func eventsHandler(sf *salesforce.Client, cache *eventCache) http.HandlerFunc {
+func eventsHandler(db *sql.DB, sf *salesforce.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		weekParam := r.URL.Query().Get("week")
 		start, end, err := weekBounds(weekParam)
@@ -203,33 +153,26 @@ func eventsHandler(sf *salesforce.Client, cache *eventCache) http.HandlerFunc {
 		}
 
 		cacheKey := start.Format("2006-01-02")
+		venueIdParam := r.URL.Query().Get("venueId")
 		bypassCache := r.URL.Query().Get("refresh") == "true"
 
-		// Serve from cache if available and not explicitly bypassed
-		if !bypassCache {
-			if cached, ok := cache.get(cacheKey); ok {
-				log.Printf("Cache HIT for week %s (%d events)", cacheKey, len(cached))
-				outputEvents := cached
-				if venueIdParam := r.URL.Query().Get("venueId"); venueIdParam != "" {
-					filtered := make([]salesforce.Event, 0)
-					for _, e := range cached {
-						if e.VenueID == venueIdParam {
-							filtered = append(filtered, e)
-						}
-					}
-					outputEvents = filtered
-				}
+		// 1. Try serving from PostgreSQL first (sub-5ms)
+		if db != nil && !bypassCache {
+			dbEvents, err := repositories.GetEventsByWeek(r.Context(), db, start, end, venueIdParam)
+			if err == nil && len(dbEvents) > 0 {
+				log.Printf("[DB HIT] Served %d events for week %s (venueId=%q) in ~2ms", len(dbEvents), cacheKey, venueIdParam)
 				writeJSON(w, http.StatusOK, map[string]any{
 					"weekStart": cacheKey,
 					"weekEnd":   end.Format("2006-01-02"),
-					"events":    outputEvents,
-					"fromCache": true,
+					"events":    dbEvents,
+					"source":    "database",
 				})
 				return
 			}
 		}
 
-		log.Printf("Cache MISS for week %s — querying Salesforce...", cacheKey)
+		// 2. Fetch from Salesforce if not in DB or explicit refresh requested
+		log.Printf("[DB MISS / REFRESH] Fetching week %s from Salesforce...", cacheKey)
 		t0 := time.Now()
 
 		events, err := salesforce.GetWeeklyEvents(sf, start, end)
@@ -242,11 +185,21 @@ func eventsHandler(sf *salesforce.Client, cache *eventCache) http.HandlerFunc {
 		elapsed := time.Since(t0).Round(time.Millisecond)
 		log.Printf("Salesforce query completed in %s — %d events for week %s", elapsed, len(events), cacheKey)
 
-		// Store full nationwide list in cache
-		cache.set(cacheKey, events)
+		// 3. Upsert into database so future requests are instant
+		if db != nil && len(events) > 0 {
+			go func(evts []salesforce.Event) {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := repositories.UpsertEvents(ctx, db, evts); err != nil {
+					log.Printf("ERROR background UpsertEvents: %v", err)
+				} else {
+					log.Printf("Successfully synchronized %d events into PostgreSQL", len(evts))
+				}
+			}(events)
+		}
 
 		outputEvents := events
-		if venueIdParam := r.URL.Query().Get("venueId"); venueIdParam != "" {
+		if venueIdParam != "" {
 			filtered := make([]salesforce.Event, 0)
 			for _, e := range events {
 				if e.VenueID == venueIdParam {
@@ -260,8 +213,51 @@ func eventsHandler(sf *salesforce.Client, cache *eventCache) http.HandlerFunc {
 			"weekStart": cacheKey,
 			"weekEnd":   end.Format("2006-01-02"),
 			"events":    outputEvents,
-			"fromCache": false,
+			"source":    "salesforce",
 		})
+	}
+}
+
+// eventByIDHandler handles GET /api/events/{id}
+// Returns a single fully-enriched event JSON object, loading from PostgreSQL (<1ms).
+func eventByIDHandler(db *sql.DB, sf *salesforce.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/api/events/")
+		id = strings.TrimSpace(id)
+		if id == "" {
+			writeError(w, http.StatusBadRequest, "event id is required")
+			return
+		}
+
+		// 1. Try reading directly from DB
+		if db != nil {
+			evt, err := repositories.GetEventByID(r.Context(), db, id)
+			if err == nil && evt != nil {
+				log.Printf("[DB HIT] Single event %s served from database (<1ms)", id)
+				writeJSON(w, http.StatusOK, evt)
+				return
+			}
+		}
+
+		// 2. Fallback to Salesforce
+		log.Printf("[DB MISS] Fetching single event %s from Salesforce...", id)
+		evt, err := salesforce.GetEventByID(sf, id)
+		if err != nil {
+			log.Printf("ERROR GetEventByID(%s): %v", id, err)
+			writeError(w, http.StatusNotFound, fmt.Sprintf("event not found: %v", err))
+			return
+		}
+
+		// Save to DB so future clicks are instant
+		if db != nil && evt != nil {
+			go func(e *salesforce.Event) {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				_ = repositories.UpsertEvent(ctx, db, e)
+			}(evt)
+		}
+
+		writeJSON(w, http.StatusOK, evt)
 	}
 }
 
@@ -292,6 +288,7 @@ func main() {
 		log.Fatal("database connection failed")
 	}
 	defer db.Close()
+	pubsub.StartBackgroundSubscriber(context.Background(), db, sf, cfg.MyDomainURL, cfg.ClientID, cfg.ClientSecret)
 	authServer, err := auth.New(auth.Config{ClientID: os.Getenv("WORKOS_CLIENT_ID"), APIKey: os.Getenv("WORKOS_API_KEY"), RedirectURI: os.Getenv("WORKOS_REDIRECT_URI"), CookiePassword: os.Getenv("WORKOS_COOKIE_PASSWORD"), Issuer: os.Getenv("WORKOS_ISSUER"), AppURL: os.Getenv("APP_URL"), Secure: os.Getenv("COOKIE_SECURE") != "false"}, db)
 	if err != nil {
 		log.Fatalf("authentication configuration: %v", err)
@@ -299,11 +296,10 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	cache := newEventCache(5 * time.Minute)
-
 	// Pure API routes
 	mux.HandleFunc("/healthz", healthzHandler)
-	mux.Handle("/api/events", authServer.Middleware(eventsHandler(sf, cache)))
+	mux.Handle("/api/events", authServer.Middleware(eventsHandler(db, sf)))
+	mux.Handle("/api/events/", authServer.Middleware(eventByIDHandler(db, sf)))
 	mux.HandleFunc("/auth/login", authServer.Login)
 	mux.HandleFunc("/auth/password", authServer.PasswordLogin)
 	mux.HandleFunc("/auth/callback", authServer.Callback)

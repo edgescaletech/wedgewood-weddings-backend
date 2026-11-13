@@ -31,4 +31,4 @@ services:
       - key: SF_CLIENT_SECRET
         sync: false
     healthCheckPath: /healthz
-    autoDeploy: true
+    autoDeploy: false
