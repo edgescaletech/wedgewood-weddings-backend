@@ -467,3 +467,41 @@ func LogPubSubEvent(ctx context.Context, db *sql.DB, entityName, changeType, sou
 	_, err := db.ExecContext(ctx, query, entityName, changeType, sourceRecordID, payloadBytes)
 	return err
 }
+
+// RecordSyncAttempt logs the start of a sync run in integration_sync_state.
+func RecordSyncAttempt(ctx context.Context, db *sql.DB, sourceSystem, subscriptionKey string) error {
+	query := `
+INSERT INTO integration_sync_state (source_system, subscription_key, last_attempt_at, status, updated_at)
+VALUES ($1, $2, NOW(), 'syncing', NOW())
+ON CONFLICT (source_system, subscription_key) DO UPDATE SET
+	last_attempt_at = NOW(),
+	status = 'syncing',
+	updated_at = NOW();`
+	_, err := db.ExecContext(ctx, query, sourceSystem, subscriptionKey)
+	return err
+}
+
+// RecordSyncResult logs the completion of a sync run (success or failure) in integration_sync_state.
+func RecordSyncResult(ctx context.Context, db *sql.DB, sourceSystem, subscriptionKey string, syncErr error) {
+	if syncErr == nil {
+		query := `
+INSERT INTO integration_sync_state (source_system, subscription_key, last_success_at, last_synced_at, status, last_error, updated_at)
+VALUES ($1, $2, NOW(), NOW(), 'healthy', NULL, NOW())
+ON CONFLICT (source_system, subscription_key) DO UPDATE SET
+	last_success_at = NOW(),
+	last_synced_at = NOW(),
+	status = 'healthy',
+	last_error = NULL,
+	updated_at = NOW();`
+		_, _ = db.ExecContext(ctx, query, sourceSystem, subscriptionKey)
+	} else {
+		query := `
+INSERT INTO integration_sync_state (source_system, subscription_key, status, last_error, updated_at)
+VALUES ($1, $2, 'failed', $3, NOW())
+ON CONFLICT (source_system, subscription_key) DO UPDATE SET
+	status = 'failed',
+	last_error = $3,
+	updated_at = NOW();`
+		_, _ = db.ExecContext(ctx, query, sourceSystem, subscriptionKey, syncErr.Error())
+	}
+}
