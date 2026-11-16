@@ -11,12 +11,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"wedding-project/internal/adapters/salesforce"
 	"wedding-project/internal/auth"
 	"wedding-project/internal/database"
+	"wedding-project/internal/jobs"
 	"wedding-project/internal/pubsub"
 	"wedding-project/internal/repositories"
 )
@@ -143,7 +145,7 @@ func docsHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(html))
 }
 
-func eventsHandler(db *sql.DB, sf *salesforce.Client) http.HandlerFunc {
+func eventsHandler(db *sql.DB, sf *salesforce.Client, syncWorker *jobs.EventSyncWorker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		weekParam := r.URL.Query().Get("week")
 		start, end, err := weekBounds(weekParam)
@@ -154,13 +156,42 @@ func eventsHandler(db *sql.DB, sf *salesforce.Client) http.HandlerFunc {
 
 		cacheKey := start.Format("2006-01-02")
 		venueIdParam := r.URL.Query().Get("venueId")
-		bypassCache := r.URL.Query().Get("refresh") == "true"
+		isRefresh := r.URL.Query().Get("refresh") == "true"
 
 		// 1. Try serving from PostgreSQL first (sub-5ms)
-		if db != nil && !bypassCache {
+		if db != nil {
 			dbEvents, err := repositories.GetEventsByWeek(r.Context(), db, start, end, venueIdParam)
 			if err == nil && len(dbEvents) > 0 {
+				// If refresh requested, kick off non-blocking background sync without freezing the UI
+				if isRefresh && syncWorker != nil {
+					syncWorker.SyncWeekAsync(start, end)
+				}
 				log.Printf("[DB HIT] Served %d events for week %s (venueId=%q) in ~2ms", len(dbEvents), cacheKey, venueIdParam)
+				resp := map[string]any{
+					"weekStart": cacheKey,
+					"weekEnd":   end.Format("2006-01-02"),
+					"events":    dbEvents,
+					"source":    "database",
+				}
+				if isRefresh {
+					resp["syncStatus"] = "syncing_in_background"
+				}
+				writeJSON(w, http.StatusOK, resp)
+				return
+			}
+		}
+
+		// 2. Cold DB: Fetch using worker
+		log.Printf("[DB COLD] Fetching week %s from Salesforce...", cacheKey)
+		if syncWorker != nil {
+			if err := syncWorker.SyncWeek(r.Context(), start, end); err != nil {
+				log.Printf("ERROR SyncWeek: %v", err)
+				writeError(w, http.StatusInternalServerError, "failed to sync events from Salesforce")
+				return
+			}
+			// Read back from DB for guaranteed consistency
+			dbEvents, err := repositories.GetEventsByWeek(r.Context(), db, start, end, venueIdParam)
+			if err == nil {
 				writeJSON(w, http.StatusOK, map[string]any{
 					"weekStart": cacheKey,
 					"weekEnd":   end.Format("2006-01-02"),
@@ -171,49 +202,49 @@ func eventsHandler(db *sql.DB, sf *salesforce.Client) http.HandlerFunc {
 			}
 		}
 
-		// 2. Fetch from Salesforce if not in DB or explicit refresh requested
-		log.Printf("[DB MISS / REFRESH] Fetching week %s from Salesforce...", cacheKey)
-		t0 := time.Now()
-
+		// Direct Salesforce fallback if DB is nil
 		events, err := salesforce.GetWeeklyEvents(sf, start, end)
 		if err != nil {
-			log.Printf("ERROR GetWeeklyEvents: %v", err)
+			log.Printf("ERROR GetWeeklyEvents fallback: %v", err)
 			writeError(w, http.StatusInternalServerError, "failed to fetch events from Salesforce")
 			return
-		}
-
-		elapsed := time.Since(t0).Round(time.Millisecond)
-		log.Printf("Salesforce query completed in %s — %d events for week %s", elapsed, len(events), cacheKey)
-
-		// 3. Upsert into database so future requests are instant
-		if db != nil && len(events) > 0 {
-			go func(evts []salesforce.Event) {
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				if err := repositories.UpsertEvents(ctx, db, evts); err != nil {
-					log.Printf("ERROR background UpsertEvents: %v", err)
-				} else {
-					log.Printf("Successfully synchronized %d events into PostgreSQL", len(evts))
-				}
-			}(events)
-		}
-
-		outputEvents := events
-		if venueIdParam != "" {
-			filtered := make([]salesforce.Event, 0)
-			for _, e := range events {
-				if e.VenueID == venueIdParam {
-					filtered = append(filtered, e)
-				}
-			}
-			outputEvents = filtered
 		}
 
 		writeJSON(w, http.StatusOK, map[string]any{
 			"weekStart": cacheKey,
 			"weekEnd":   end.Format("2006-01-02"),
-			"events":    outputEvents,
+			"events":    events,
 			"source":    "salesforce",
+		})
+	}
+}
+
+// syncEventsHandler triggers an immediate non-blocking background sync for a week.
+// Responds with 202 Accepted in under 5ms.
+func syncEventsHandler(syncWorker *jobs.EventSyncWorker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		weekParam := r.URL.Query().Get("week")
+		start, end, err := weekBounds(weekParam)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		started := false
+		if syncWorker != nil {
+			started = syncWorker.SyncWeekAsync(start, end)
+		}
+
+		statusMsg := "sync started in background"
+		if !started {
+			statusMsg = "sync already in progress for this week"
+		}
+
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"status":    "accepted",
+			"message":   statusMsg,
+			"weekStart": start.Format("2006-01-02"),
+			"weekEnd":   end.Format("2006-01-02"),
 		})
 	}
 }
@@ -289,6 +320,41 @@ func main() {
 	}
 	defer db.Close()
 	pubsub.StartBackgroundSubscriber(context.Background(), db, sf, cfg.MyDomainURL, cfg.ClientID, cfg.ClientSecret)
+
+	// Initialize background async sync worker and scheduled pre-warming
+	var syncWorker *jobs.EventSyncWorker
+	if db != nil && sf != nil {
+		syncWorker = jobs.NewEventSyncWorker(db, sf)
+
+		syncInterval := 1 * time.Hour
+		intervalVal := os.Getenv("SF_TO_DB_SYNC_INTERVAL")
+		if intervalVal == "" {
+			intervalVal = os.Getenv("SYNC_INTERVAL")
+		}
+		if intervalVal != "" {
+			if parsed, err := time.ParseDuration(intervalVal); err == nil && parsed > 0 {
+				syncInterval = parsed
+			} else {
+				log.Printf("Invalid SF_TO_DB_SYNC_INTERVAL %q, defaulting to %s", intervalVal, syncInterval)
+			}
+		}
+
+		syncWeeksAhead := 4
+		weeksVal := os.Getenv("SF_TO_DB_SYNC_WEEKS_AHEAD")
+		if weeksVal == "" {
+			weeksVal = os.Getenv("SYNC_WEEKS_AHEAD")
+		}
+		if weeksVal != "" {
+			if parsed, err := strconv.Atoi(weeksVal); err == nil && parsed > 0 {
+				syncWeeksAhead = parsed
+			} else {
+				log.Printf("Invalid SF_TO_DB_SYNC_WEEKS_AHEAD %q, defaulting to %d", weeksVal, syncWeeksAhead)
+			}
+		}
+
+		syncWorker.StartScheduledSync(context.Background(), syncInterval, syncWeeksAhead)
+	}
+
 	authServer, err := auth.New(auth.Config{ClientID: os.Getenv("WORKOS_CLIENT_ID"), APIKey: os.Getenv("WORKOS_API_KEY"), RedirectURI: os.Getenv("WORKOS_REDIRECT_URI"), CookiePassword: os.Getenv("WORKOS_COOKIE_PASSWORD"), Issuer: os.Getenv("WORKOS_ISSUER"), AppURL: os.Getenv("APP_URL"), Secure: os.Getenv("COOKIE_SECURE") != "false"}, db)
 	if err != nil {
 		log.Fatalf("authentication configuration: %v", err)
@@ -299,8 +365,9 @@ func main() {
 	// Pure API routes
 	mux.HandleFunc("/healthz", healthzHandler)
 
-	mux.Handle("/api/events", authServer.Middleware(eventsHandler(db, sf)))
+	mux.Handle("/api/events", authServer.Middleware(eventsHandler(db, sf, syncWorker)))
 	mux.Handle("/api/events/", authServer.Middleware(eventByIDHandler(db, sf)))
+	mux.Handle("/api/sync/events", authServer.Middleware(syncEventsHandler(syncWorker)))
 
 	mux.HandleFunc("/auth/login", authServer.Login)
 	mux.HandleFunc("/auth/password", authServer.PasswordLogin)
