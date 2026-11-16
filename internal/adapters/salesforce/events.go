@@ -1,6 +1,7 @@
 package salesforce
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -157,14 +158,19 @@ ORDER BY CloseDate DESC
 LIMIT 100
 `
 
-// GetWeeklyEvents queries events for [weekStart, weekEnd].
+// GetWeeklyEvents queries events for [weekStart, weekEnd] using background context.
 func GetWeeklyEvents(c *Client, weekStart, weekEnd time.Time) ([]Event, error) {
+	return GetWeeklyEventsContext(context.Background(), c, weekStart, weekEnd)
+}
+
+// GetWeeklyEventsContext queries events for [weekStart, weekEnd] respecting context cancellation.
+func GetWeeklyEventsContext(ctx context.Context, c *Client, weekStart, weekEnd time.Time) ([]Event, error) {
 	startDateStr := weekStart.Format("2006-01-02")
 	endDateStr := weekEnd.Format("2006-01-02")
 
 	// 1. Try custom Wedgewood SOQL
 	soql := fmt.Sprintf(wedgewoodSOQL, startDateStr, endDateStr)
-	records, err := c.Query(soql)
+	records, err := c.QueryContext(ctx, soql)
 	if err == nil {
 		events := make([]Event, 0, len(records))
 		for _, raw := range records {
@@ -180,7 +186,7 @@ func GetWeeklyEvents(c *Client, weekStart, weekEnd time.Time) ([]Event, error) {
 
 		// Fast in-memory sort by date then time
 		sortEvents(events)
-		enrichEventsWithCPQQuotes(c, events)
+		enrichEventsWithCPQQuotes(ctx, c, events)
 		return events, nil
 	}
 
@@ -193,9 +199,9 @@ func GetWeeklyEvents(c *Client, weekStart, weekEnd time.Time) ([]Event, error) {
 
 	// 2. Fall back to standard Opportunity query
 	stdSoql := fmt.Sprintf(standardSOQL, startDateStr, endDateStr)
-	stdRecords, err := c.Query(stdSoql)
+	stdRecords, err := c.QueryContext(ctx, stdSoql)
 	if err != nil || len(stdRecords) == 0 {
-		stdRecords, err = c.Query(fallbackSOQL)
+		stdRecords, err = c.QueryContext(ctx, fallbackSOQL)
 		if err != nil {
 			return nil, err
 		}
@@ -436,7 +442,7 @@ func appendUnique(slice []string, val string) []string {
 	return append(slice, val)
 }
 
-func enrichEventsWithCPQQuotes(c *Client, events []Event) {
+func enrichEventsWithCPQQuotes(ctx context.Context, c *Client, events []Event) {
 	if len(events) == 0 {
 		return
 	}
@@ -475,7 +481,7 @@ WHERE SBQQ__Opportunity2__c IN (%s)
   AND SBQQ__Primary__c = TRUE
 `, quotedOppIDs)
 
-	qRecords, err := c.Query(quoteSOQL)
+	qRecords, err := c.QueryContext(ctx, quoteSOQL)
 	if err != nil {
 		log.Printf("CPQ Quote query notice: %v", err)
 		return
@@ -555,7 +561,7 @@ WHERE SBQQ__Quote__c IN (%s)
 
 	quoteStaffedPhotobooth := make(map[string]bool)
 
-	qlRecords, err := c.Query(qlSOQL)
+	qlRecords, err := c.QueryContext(ctx, qlSOQL)
 	if err != nil {
 		log.Printf("CPQ QuoteLine query notice: %v", err)
 	} else {
@@ -783,6 +789,6 @@ LIMIT 1`, id)
 
 	// Enrich with CPQ quote (reuse weekly enrichment on a 1-element slice)
 	events := []Event{evt}
-	enrichEventsWithCPQQuotes(c, events)
+	enrichEventsWithCPQQuotes(context.Background(), c, events)
 	return &events[0], nil
 }
