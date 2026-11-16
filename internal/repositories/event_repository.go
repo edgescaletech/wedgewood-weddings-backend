@@ -496,7 +496,7 @@ ON CONFLICT (source_system, subscription_key) DO UPDATE SET
 }
 
 // RecordSyncResult logs the completion of a sync run (success or failure) in integration_sync_state.
-func RecordSyncResult(ctx context.Context, db *sql.DB, sourceSystem, subscriptionKey string, syncErr error) {
+func RecordSyncResult(ctx context.Context, db *sql.DB, sourceSystem, subscriptionKey string, syncErr error) error {
 	if syncErr == nil {
 		query := `
 INSERT INTO integration_sync_state (source_system, subscription_key, last_success_at, last_synced_at, status, last_error, updated_at)
@@ -507,15 +507,16 @@ ON CONFLICT (source_system, subscription_key) DO UPDATE SET
 	status = 'healthy',
 	last_error = NULL,
 	updated_at = NOW();`
-		_, _ = db.ExecContext(ctx, query, sourceSystem, subscriptionKey)
-	} else {
-		query := `
+		_, err := db.ExecContext(ctx, query, sourceSystem, subscriptionKey)
+		return err
+	}
+	query := `
 INSERT INTO integration_sync_state (source_system, subscription_key, status, last_error, updated_at)
 VALUES ($1, $2, 'failed', $3, NOW())
 ON CONFLICT (source_system, subscription_key) DO UPDATE SET
 	status = 'failed',
 	last_error = $3,
 	updated_at = NOW();`
-		_, _ = db.ExecContext(ctx, query, sourceSystem, subscriptionKey, syncErr.Error())
-	}
+	_, err := db.ExecContext(ctx, query, sourceSystem, subscriptionKey, syncErr.Error())
+	return err
 }

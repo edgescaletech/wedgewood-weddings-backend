@@ -202,18 +202,29 @@ func eventsHandler(db *sql.DB, sf *salesforce.Client, syncWorker *jobs.EventSync
 			}
 		}
 
-		// Direct Salesforce fallback if DB is nil
-		events, err := salesforce.GetWeeklyEvents(sf, start, end)
+		// Direct Salesforce fallback if DB is nil or readback failed
+		events, err := salesforce.GetWeeklyEventsContext(r.Context(), sf, start, end)
 		if err != nil {
 			log.Printf("ERROR GetWeeklyEvents fallback: %v", err)
 			writeError(w, http.StatusInternalServerError, "failed to fetch events from Salesforce")
 			return
 		}
 
+		outputEvents := events
+		if venueIdParam != "" {
+			filtered := make([]salesforce.Event, 0)
+			for _, e := range events {
+				if e.VenueID == venueIdParam {
+					filtered = append(filtered, e)
+				}
+			}
+			outputEvents = filtered
+		}
+
 		writeJSON(w, http.StatusOK, map[string]any{
 			"weekStart": cacheKey,
 			"weekEnd":   end.Format("2006-01-02"),
-			"events":    events,
+			"events":    outputEvents,
 			"source":    "salesforce",
 		})
 	}

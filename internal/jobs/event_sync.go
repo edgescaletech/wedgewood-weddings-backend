@@ -17,7 +17,8 @@ type EventSyncWorker struct {
 	db        *sql.DB
 	sf        *salesforce.Client
 	runningMu sync.Mutex
-	running   map[string]bool // key: weekStart (e.g. "2026-11-23") prevents duplicate concurrent syncs
+	running   map[string]chan struct{} // channel closed when sync finishes (prevents duplicate calls)
+	sem       chan struct{}            // limits max concurrent active Salesforce syncs across all weeks
 }
 
 // NewEventSyncWorker creates a new background sync worker instance.
@@ -25,7 +26,8 @@ func NewEventSyncWorker(db *sql.DB, sf *salesforce.Client) *EventSyncWorker {
 	return &EventSyncWorker{
 		db:      db,
 		sf:      sf,
-		running: make(map[string]bool),
+		running: make(map[string]chan struct{}),
+		sem:     make(chan struct{}, 2), // max 2 concurrent Salesforce syncs
 	}
 }
 
@@ -35,21 +37,14 @@ func (w *EventSyncWorker) SyncWeekAsync(weekStart, weekEnd time.Time) bool {
 	key := weekStart.Format("2006-01-02")
 
 	w.runningMu.Lock()
-	if w.running[key] {
+	if _, isRunning := w.running[key]; isRunning {
 		w.runningMu.Unlock()
 		log.Printf("[AsyncSync] Sync for week %s is already in progress, skipping duplicate trigger", key)
 		return false
 	}
-	w.running[key] = true
 	w.runningMu.Unlock()
 
 	go func() {
-		defer func() {
-			w.runningMu.Lock()
-			delete(w.running, key)
-			w.runningMu.Unlock()
-		}()
-
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 
@@ -62,18 +57,54 @@ func (w *EventSyncWorker) SyncWeekAsync(weekStart, weekEnd time.Time) bool {
 }
 
 // SyncWeek fetches events for the specified week from Salesforce and upserts them to PostgreSQL.
+// If another goroutine is already syncing this week, it waits for that sync to finish (deduplication).
 func (w *EventSyncWorker) SyncWeek(ctx context.Context, weekStart, weekEnd time.Time) error {
 	key := weekStart.Format("2006-01-02")
 	subscriptionKey := fmt.Sprintf("sf_events_week_%s", key)
 
-	_ = repositories.RecordSyncAttempt(ctx, w.db, "salesforce", subscriptionKey)
+	w.runningMu.Lock()
+	waitCh, isRunning := w.running[key]
+	if isRunning {
+		w.runningMu.Unlock()
+		log.Printf("[AsyncSync] Sync for week %s already in-flight, waiting for completion...", key)
+		select {
+		case <-waitCh:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	doneCh := make(chan struct{})
+	w.running[key] = doneCh
+	w.runningMu.Unlock()
+
+	defer func() {
+		w.runningMu.Lock()
+		delete(w.running, key)
+		close(doneCh)
+		w.runningMu.Unlock()
+	}()
+
+	// Acquire semaphore token to avoid overwhelming Salesforce with concurrent requests
+	select {
+	case w.sem <- struct{}{}:
+		defer func() { <-w.sem }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	if err := repositories.RecordSyncAttempt(ctx, w.db, "salesforce", subscriptionKey); err != nil {
+		log.Printf("[AsyncSync WARNING] Failed to record sync attempt: %v", err)
+	}
 
 	t0 := time.Now()
 	log.Printf("[AsyncSync] Background job starting for week %s to %s...", key, weekEnd.Format("2006-01-02"))
 
-	events, err := salesforce.GetWeeklyEvents(w.sf, weekStart, weekEnd)
+	events, err := salesforce.GetWeeklyEventsContext(ctx, w.sf, weekStart, weekEnd)
 	if err != nil {
-		repositories.RecordSyncResult(ctx, w.db, "salesforce", subscriptionKey, err)
+		if recErr := repositories.RecordSyncResult(ctx, w.db, "salesforce", subscriptionKey, err); recErr != nil {
+			log.Printf("[AsyncSync WARNING] Failed to record sync error result: %v", recErr)
+		}
 		return fmt.Errorf("salesforce fetch: %w", err)
 	}
 
@@ -82,12 +113,16 @@ func (w *EventSyncWorker) SyncWeek(ctx context.Context, weekStart, weekEnd time.
 
 	tSave := time.Now()
 	if err := repositories.UpsertEvents(ctx, w.db, events); err != nil {
-		repositories.RecordSyncResult(ctx, w.db, "salesforce", subscriptionKey, err)
+		if recErr := repositories.RecordSyncResult(ctx, w.db, "salesforce", subscriptionKey, err); recErr != nil {
+			log.Printf("[AsyncSync WARNING] Failed to record sync error result: %v", recErr)
+		}
 		return fmt.Errorf("upsert events: %w", err)
 	}
 
 	saveDuration := time.Since(tSave).Round(time.Millisecond)
-	repositories.RecordSyncResult(ctx, w.db, "salesforce", subscriptionKey, nil)
+	if recErr := repositories.RecordSyncResult(ctx, w.db, "salesforce", subscriptionKey, nil); recErr != nil {
+		log.Printf("[AsyncSync WARNING] Failed to record sync success result: %v", recErr)
+	}
 
 	log.Printf("[AsyncSync SUCCESS] Synchronized %d events for week %s in %s (total: %s)",
 		len(events), key, saveDuration, time.Since(t0).Round(time.Millisecond))

@@ -1,6 +1,7 @@
 package salesforce
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -129,23 +130,28 @@ type QueryResponse struct {
 
 // Query executes a SOQL query with automatic token retrieval and retry on 401.
 func (c *Client) Query(soql string) ([]json.RawMessage, error) {
-	records, err := c.doQuery(soql)
+	return c.QueryContext(context.Background(), soql)
+}
+
+// QueryContext executes a SOQL query with context cancellation, automatic token retrieval, and retry on 401.
+func (c *Client) QueryContext(ctx context.Context, soql string) ([]json.RawMessage, error) {
+	records, err := c.doQuery(ctx, soql)
 	if err != nil && strings.Contains(err.Error(), "401 unauthorized") {
 		// Token may have expired — invalidate and retry once
 		c.invalidateToken()
-		return c.doQuery(soql)
+		return c.doQuery(ctx, soql)
 	}
 	return records, err
 }
 
-func (c *Client) doQuery(soql string) ([]json.RawMessage, error) {
+func (c *Client) doQuery(ctx context.Context, soql string) ([]json.RawMessage, error) {
 	token, err := c.ensureToken()
 	if err != nil {
 		return nil, err
 	}
 
 	endpoint := c.cfg.MyDomainURL + "/services/data/v62.0/query"
-	req, err := http.NewRequest("GET", endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
