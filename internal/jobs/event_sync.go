@@ -127,8 +127,19 @@ func (w *EventSyncWorker) sweepUpcomingWeeks(ctx context.Context, weeksAhead int
 	currentMonday := time.Date(now.Year(), now.Month(), now.Day()+offset, 0, 0, 0, 0, now.Location())
 
 	for i := 0; i < weeksAhead; i++ {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		wStart := currentMonday.AddDate(0, 0, i*7)
 		wEnd := wStart.AddDate(0, 0, 6)
-		w.SyncWeekAsync(wStart, wEnd)
+
+		sweepCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		if err := w.SyncWeek(sweepCtx, wStart, wEnd); err != nil {
+			log.Printf("[AsyncSync Scheduler] Sweep error for week %s: %v", wStart.Format("2006-01-02"), err)
+		}
+		cancel()
 	}
 }

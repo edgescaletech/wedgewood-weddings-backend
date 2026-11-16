@@ -176,9 +176,23 @@ ON CONFLICT (id) DO UPDATE SET
 	}
 	defer venueStmt.Close()
 
+	// Deduplicate venues to avoid redundant DB writes and row-lock contention
+	uniqueVenues := make(map[string]models.Event)
 	for _, e := range evts {
 		if e.VenueID != "" {
-			_, _ = venueStmt.ExecContext(ctx, e.VenueID, e.Venue, e.VenueProperty, e.VenueGM)
+			if existing, ok := uniqueVenues[e.VenueID]; !ok || (existing.Venue == "" && e.Venue != "") {
+				uniqueVenues[e.VenueID] = e
+			}
+		}
+	}
+
+	for _, e := range uniqueVenues {
+		venueName := e.Venue
+		if venueName == "" {
+			venueName = "Unknown Venue"
+		}
+		if _, err := venueStmt.ExecContext(ctx, e.VenueID, venueName, e.VenueProperty, e.VenueGM); err != nil {
+			return fmt.Errorf("upsert venue %s: %w", e.VenueID, err)
 		}
 	}
 
