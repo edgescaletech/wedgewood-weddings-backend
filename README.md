@@ -79,18 +79,32 @@ WorkOS sends a hosted invitation. The invitee follows the email link, sets their
 
 Use `POST /api/admin/users/{id}/invitation/resend` with a new idempotency key to resend a pending invitation or replace an expired one. Retrying that resend uses the same key. If delivery succeeds but local finalization fails, a retry uses the persisted WorkOS invitation ID and rechecks the Admin's permissions. If WorkOS delivery remains ambiguous after one hour, inspect the attempt in `user_invitation_operations` and reconcile the original delivery with WorkOS before any operator changes. Preserve the operation and verify the WorkOS invitation ID from provider records before resuming. A separate create request will not replace it.
 
-`PATCH /api/admin/users/{id}` updates the local display name. `DELETE /api/admin/users/{id}` archives the local account and removes local sessions. Migration 007 enforces an inactive state for archived users and permits pending users without a WorkOS ID. Upgrade with the original `003_event_sync_tracking` files from `dev` and migrations 004–007. Stop the old backend before applying 007, then start the invitation-only backend and deploy the frontend without signup.
+`PATCH /api/admin/users/{id}` updates the local display name. `DELETE /api/admin/users/{id}` archives the local account and removes local sessions. Migration 007 requires an invitation ID for every account and enforces an inactive state for archived users. Pending users receive a WorkOS user ID when they sign in after accepting their invitation.
 
 Role assignments use `POST /api/admin/users/{id}/roles` with `roleId` and optional `venueId`; removal uses `DELETE /api/admin/users/{id}/roles/{assignmentId}`. V1 exposes read-only role definitions and permission mappings. Authorized operators can configure them in PostgreSQL. Reactivating a user requires authority over the permissions in every retained role. Roles on suspended resources require global authority because these grants can resume after reopening. The roles and effective-permissions endpoints show access from assigned roles. Effective permissions accept an optional `venueId` query parameter. User-specific overrides and their API routes have been removed. The effective-permissions response no longer includes `override`; `inherited` and `effective` both report role-derived access.
 
-After applying the Admin migrations, use your operator SQL script to activate the first WorkOS-linked local user and assign the global Admin role in one transaction. For a fresh environment, an operator must first create or invite the first Admin in WorkOS, verify the accepted WorkOS user ID in the dashboard, and insert the corresponding local user with that ID through private database access. Use `assignment_type = 'global'` and `resource_id = NULL` for the global assignment. Subsequent access management uses the Admin API.
+### Seed the first Admin
+
+1. Apply the database migrations and send the first Admin an invitation from the WorkOS dashboard.
+2. After acceptance, verify the invitation ID, accepted WorkOS user ID, and matching recipient email in the same WorkOS environment used by the API.
+3. Run the script from the backend repository root with your private database connection and the verified values.
+
+   ```sh
+   psql "$DATABASE_URL" -X -f scripts/seed-first-admin.sql \
+     -v workos_user_id='REPLACE_WITH_ACCEPTED_WORKOS_USER_ID' \
+     -v workos_invitation_id='REPLACE_WITH_WORKOS_INVITATION_ID' \
+     -v email='admin@example.com' \
+     -v display_name='First Admin'
+   ```
+
+The script creates the active local user, assigns the global Admin role, and writes an audit record in one transaction. It stops if the Admin role is already assigned or the user ID, invitation ID, or email already exists. The operator verifies the WorkOS values before running SQL. The first Admin can then sign in and use the Admin API for subsequent accounts.
 
 Existing venue identifiers are Salesforce text IDs, not UUIDs. A resource permission check requires an active local user and active registry entry. It combines grants from global roles and roles assigned directly to that resource. Administrative permissions use an explicit global check. Existing event routes remain authenticated but are not yet governed by scheduling permissions.
 
 1. Navigate the browser to `GET /auth/login` on the backend. It redirects to the hosted WorkOS AuthKit sign-in page.
 2. WorkOS redirects to `GET /auth/callback`. The backend checks OAuth state, exchanges the code, verifies the access token, and links the user by their immutable WorkOS user ID.
-3. The backend checks for an existing account or a verified, accepted invitation before establishing a session and redirecting to `APP_URL`. Account status remains controlled locally.
-4. Inactive existing users must be activated by a privately authorized operator. See [Activate a user](#activate-a-user).
+3. On first sign-in, the backend verifies invitation acceptance before linking the local account. On later sign-ins it uses the linked WorkOS ID. It establishes a session and redirects to `APP_URL`.
+4. After invitation acceptance, an authorized Admin must activate the local account. See [Activate a user](#activate-a-user).
 5. The frontend can call `GET /auth/me` with credentials to retrieve the active local identity.
 
 ### Invitation-only WorkOS setup
@@ -122,19 +136,7 @@ Session cookies use `SameSite=Lax`, so this setup does not support cross-site fr
 
 ## Activate a user
 
-New users are inactive by default and cannot access protected endpoints. An administrator can activate users through the protected Admin API. An authorized operator with private database access can also verify the complete WorkOS ID before activating an account:
-
-```sql
-SELECT workos_id, email, is_active FROM users;
-
-UPDATE users
-SET is_active = true, updated_at = now()
-WHERE workos_id = 'user_verified_workos_id'
-  AND archived_at IS NULL
-RETURNING workos_id, email, is_active;
-```
-
-Copy the complete ID, not a truncated value from a table display. Activation requires an authorized Admin API session or private database access. A protected request returns `401` without a valid session and `403` for an inactive local account.
+New users start inactive. After the invitee accepts the invitation and signs in, an authorized Admin can activate the linked account with `POST /api/admin/users/{id}/activate`. A protected request returns `401` without a valid session and `403` for an inactive local account.
 
 ## API routes
 
@@ -193,14 +195,9 @@ Set `RBAC_TEST_DATABASE_URL` to a disposable PostgreSQL database to run the opti
 
 Weekly and individual event requests use the PostgreSQL event cache when available and fall back to Salesforce. The background Salesforce Pub/Sub subscriber starts with the API and updates the database. Apply migrations before starting the service. Render auto-deploy is disabled; deploy only after migrations succeed.
 
-Migrations 001 and 002 create the event and authentication tables. Version 003 is reserved for the event-sync tracking migration on `dev`. Admin migrations 004, 005, and 006 add RBAC and audit tables, local display names and archival state, and security guards, respectively. The version 002 down migration deletes all local users and sessions, and the version 004 down migration is destructive. Version 006 blocks rollback and protects the audit table with a database dependency.
+Migrations 001 and 002 create the event and authentication tables. Version 003 adds event-sync tracking and matches `dev`. Admin migrations 004, 005, and 006 add RBAC and audit tables, local display names and archival state, and security guards, respectively. The version 002 down migration deletes all local users and sessions, and the version 004 down migration is destructive. Version 006 blocks rollback and protects the audit table with a database dependency.
 
-Production can apply the Admin migrations after the existing event-sync history. For disposable local databases that ran an earlier draft of the Admin migrations, start with a fresh database and apply the current sequence.
-
-Older databases that ran the authentication branch's original version 1 instead of `dev`'s version 1 must apply `internal/migrations/001_phase1_tables.up.sql` manually before upgrading. Those databases may already have user tables that predate version 2, so do not run the version 2 down migration on them without a reviewed recovery plan.
-
-`CREATE TABLE IF NOT EXISTS` does not repair an existing table with a different definition. Inspect unexpected schemas before applying migrations. The version 1 down migration drops event-related tables and their data; do not use it against a database containing data you need.
-
+Apply the current migration sequence to a fresh development database. Reset local databases that ran a temporary authentication or Admin schema. A database at version 003 with an empty `users` table can apply migrations 004–007 directly.
 
 Migration 006 preserves audit history and makes assignment IDs, users, roles, and venues immutable through SQL UPDATE. Use the protected Admin assignment removal and creation endpoints to change access. Removing an assignment revokes its grants. Grants from other assignments still apply.
 
