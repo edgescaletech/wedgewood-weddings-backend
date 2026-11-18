@@ -32,22 +32,20 @@ import (
 
 type testTransport func(*http.Request) (*http.Response, error)
 
-type testIdentityProvider func(context.Context, string, string, string, string) (string, error)
-
-func (provider testIdentityProvider) Create(ctx context.Context, operationID, email, name, password string) (string, error) {
-	return provider(ctx, operationID, email, name, password)
+type testIdentityProvider struct {
+	send       func(context.Context, string, string) (*workos.UserInvite, error)
+	priorState workos.UserInviteState
 }
 
-func provisionTestUser(_ context.Context, _ string, email, name, password string) (string, error) {
-	if email == "failure@example.com" {
-		return "", errors.New("upstream exposed " + password)
-	}
-	if email != "new@example.com" || name != "New user" || password != "test-password-123" {
-		return "", errors.New("unexpected provisioning input")
-	}
-	return "workos-new", nil
+func (provider testIdentityProvider) Send(ctx context.Context, email, key string) (*workos.UserInvite, error) {
+	return provider.send(ctx, email, key)
 }
-
+func (provider testIdentityProvider) Get(_ context.Context, id string) (*workos.UserInvite, error) {
+	return &workos.UserInvite{ID: id, Email: "new@example.com", State: provider.priorState}, nil
+}
+func (provider testIdentityProvider) Resend(_ context.Context, id, _ string) (*workos.UserInvite, error) {
+	return &workos.UserInvite{ID: id, Email: "new@example.com"}, nil
+}
 func (transport testTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	return transport(request)
 }
@@ -85,7 +83,7 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, file := range []string{"001_phase1_tables.up.sql", "002_auth.up.sql", "004_admin.up.sql", "005_user_admin.up.sql", "006_security_guards.up.sql"} {
+	for _, file := range []string{"001_phase1_tables.up.sql", "002_auth.up.sql", "003_event_sync_tracking.up.sql", "004_admin.up.sql", "005_user_admin.up.sql", "006_security_guards.up.sql", "007_invitations.up.sql"} {
 		migration, err := os.ReadFile(filepath.Join("..", "migrations", file))
 		if err != nil {
 			t.Fatal(err)
@@ -140,7 +138,7 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{DB: db, Auth: authServer, Access: &authorization.Service{DB: db}, AppURL: "http://localhost:3000", Identity: testIdentityProvider(provisionTestUser)}
+	server := &Server{DB: db, Auth: authServer, Access: &authorization.Service{DB: db}, AppURL: "http://localhost:3000"}
 	mux := http.NewServeMux()
 	server.Register(mux)
 	request := httptest.NewRequest(http.MethodPatch, "/api/admin/users/"+ids[1], strings.NewReader(`{"displayName":"Updated"}`))
@@ -165,8 +163,9 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO venues(id,name) VALUES('venue-test','Test')`); err != nil {
 		t.Fatal(err)
 	}
-	call := func(method, path, body string) *httptest.ResponseRecorder {
+	callWithKey := func(method, path, body, key string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Idempotency-Key", key)
 		request.Header.Set("Origin", "http://localhost:3000")
 		request.Header.Set("Content-Type", "application/json")
 		request.AddCookie(&http.Cookie{Name: "session", Value: "browser-session"})
@@ -174,6 +173,10 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 		mux.ServeHTTP(response, request)
 		return response
 	}
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		return callWithKey(method, path, body, uuid.NewString())
+	}
+
 	// UUID text casing must not bypass self-modification protection.
 	response = call(http.MethodPost, "/api/admin/users/"+strings.ToUpper(ids[0])+"/roles", `{"roleId":"00000000-0000-4000-8000-000000000003","venueId":"venue-test"}`)
 	if response.Code != http.StatusForbidden {
@@ -208,53 +211,74 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	const newUser = `{"email":"new@example.com","displayName":"New user","password":"test-password-123"}`
-	var operationIDs []string
-	server.Identity = testIdentityProvider(func(ctx context.Context, operationID, email, name, password string) (string, error) {
-		operationIDs = append(operationIDs, operationID)
-		return provisionTestUser(ctx, operationID, email, name, password)
-	})
-	exec(`ALTER TABLE audit_logs ADD CONSTRAINT test_fail_provision CHECK (action <> 'user.create')`)
-	if response := call(http.MethodPost, "/api/admin/users", newUser); response.Code != http.StatusServiceUnavailable {
-		t.Fatalf("forced local failure: %d", response.Code)
+	const newUser = `{"email":"new@example.com","displayName":"New user","roles":[{"roleId":"00000000-0000-4000-8000-000000000003","venueId":"venue-test"}]}`
+	invitationKey := uuid.NewString()
+	deliveries := 0
+	server.Identity = testIdentityProvider{priorState: "pending", send: func(_ context.Context, email, key string) (*workos.UserInvite, error) {
+		deliveries++
+		if email != "new@example.com" {
+			return nil, &workos.APIError{StatusCode: 422}
+		}
+		if key != "admin-invite-"+invitationKey {
+			return nil, errors.New("unexpected idempotency key")
+		}
+		return &workos.UserInvite{ID: "inv-new", Email: email}, nil
+	}}
+	exec(`ALTER TABLE audit_logs ADD CONSTRAINT test_fail_provision CHECK (action <> 'user.invite')`)
+	if response := callWithKey(http.MethodPost, "/api/admin/users", newUser, invitationKey); response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("forced local failure: %d %s", response.Code, response.Body)
 	}
 	exec(`ALTER TABLE audit_logs DROP CONSTRAINT test_fail_provision`)
-	response = call(http.MethodPost, "/api/admin/users", newUser)
-	if response.Code != http.StatusNoContent || len(operationIDs) != 2 || operationIDs[0] != operationIDs[1] {
-		t.Fatalf("retry did not reuse the WorkOS operation: %d %v", response.Code, operationIDs)
+	for range 2 {
+		if response := callWithKey(http.MethodPost, "/api/admin/users", newUser, invitationKey); response.Code != http.StatusNoContent {
+			t.Fatalf("retry status: %d %s", response.Code, response.Body)
+		}
 	}
-	if response := call(http.MethodPost, "/api/admin/users", newUser); response.Code != http.StatusNoContent || len(operationIDs) != 2 {
-		t.Fatalf("completed retry called WorkOS again: %d %v", response.Code, operationIDs)
+	if deliveries != 1 {
+		t.Fatalf("provider deliveries=%d", deliveries)
 	}
-	var usersCreated, auditsCreated int
-	if err := db.QueryRow(`SELECT (SELECT count(*) FROM users WHERE workos_id='workos-new'),
-		(SELECT count(*) FROM audit_logs WHERE action='user.create' AND metadata->>'workosId'='workos-new')`).Scan(&usersCreated, &auditsCreated); err != nil || usersCreated != 1 || auditsCreated != 1 {
-		t.Fatalf("retry produced duplicate or missing records: users=%d audits=%d err=%v", usersCreated, auditsCreated, err)
+	if response := call(http.MethodPost, "/api/admin/users", newUser); response.Code != http.StatusConflict {
+		t.Fatalf("independent create: %d", response.Code)
 	}
-	server.Identity = testIdentityProvider(provisionTestUser)
-	if response.Code != http.StatusNoContent {
-		t.Fatalf("provision user: %d %s", response.Code, response.Body.String())
+	if response := callWithKey(http.MethodPost, "/api/admin/users", strings.Replace(newUser, "New user", "Different name", 1), invitationKey); response.Code != http.StatusConflict {
+		t.Fatalf("changed replay: %d", response.Code)
 	}
-	var newActive bool
-	if err := db.QueryRow(`SELECT is_active FROM users WHERE workos_id='workos-new'`).Scan(&newActive); err != nil || newActive {
-		t.Fatalf("new user active=%v err=%v", newActive, err)
+
+	var invitedID string
+	if err := db.QueryRow(`SELECT id FROM users WHERE workos_invitation_id='inv-new' AND workos_id IS NULL
+    AND NOT is_active AND display_name='New user' AND EXISTS (SELECT 1 FROM user_roles WHERE user_id=users.id)`).Scan(&invitedID); err != nil {
+		t.Fatal(err)
 	}
-	var passwordStored bool
-	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE to_jsonb(users)::text LIKE '%test-password-123%') OR EXISTS(SELECT 1 FROM audit_logs WHERE metadata::text LIKE '%test-password-123%')`).Scan(&passwordStored); err != nil || passwordStored {
-		t.Fatalf("password persisted in user or audit data: %v; error=%v", passwordStored, err)
+	if response := call(http.MethodPost, "/api/admin/users/"+invitedID+"/activate", ""); response.Code != http.StatusNotFound {
+		t.Fatalf("unaccepted activation: %d", response.Code)
 	}
-	response = call(http.MethodPost, "/api/admin/users", `{"email":"failure@example.com","displayName":"Failed user","password":"private-test-password"}`)
-	if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), "private-test-password") {
-		t.Fatalf("unexpected failure response: %d", response.Code)
+	resendPath := "/api/admin/users/" + invitedID + "/invitation/resend"
+	if response := call(http.MethodPost, resendPath, ""); response.Code != http.StatusNoContent {
+		t.Fatalf("resend: %d %s", response.Code, response.Body)
 	}
-	var failedRows int
-	if err := db.QueryRow(`SELECT count(*) FROM users WHERE email='failure@example.com'`).Scan(&failedRows); err != nil || failedRows != 0 {
-		t.Fatalf("failed provisioning persisted user: count=%d err=%v", failedRows, err)
+	server.Identity = testIdentityProvider{priorState: "expired", send: func(_ context.Context, email, _ string) (*workos.UserInvite, error) {
+		return &workos.UserInvite{ID: "inv-replacement", Email: email}, nil
+	}}
+	if response := call(http.MethodPost, resendPath, ""); response.Code != http.StatusNoContent {
+		t.Fatalf("expired resend: %d %s", response.Code, response.Body)
 	}
-	response = call(http.MethodPost, "/api/admin/users", `{"email":"empty@example.com","displayName":"Empty password","password":""}`)
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("empty password status: %d", response.Code)
+	exec(`UPDATE users SET archived_at=now() WHERE id=$1`, invitedID)
+	if _, err := db.Exec(`UPDATE users SET is_active=true,workos_id='test-archived' WHERE id=$1`, invitedID); err == nil {
+		t.Fatal("archived activation bypassed database check")
 	}
+	server.Identity = testIdentityProvider{send: func(_ context.Context, email, _ string) (*workos.UserInvite, error) {
+		return nil, &workos.APIError{StatusCode: 422}
+	}}
+	failure := "/api/admin/users"
+	for _, name := range []string{"First", "Corrected"} {
+		if response := call(http.MethodPost, failure, `{"email":"failed@example.com","displayName":"`+name+`"}`); response.Code != http.StatusBadRequest {
+			t.Fatalf("correctable rejection: %d", response.Code)
+		}
+	}
+	if response := call(http.MethodPost, failure, `{"email":"password@example.com","displayName":"Password","password":"test"}`); response.Code != http.StatusBadRequest {
+		t.Fatalf("admin password accepted: %d", response.Code)
+	}
+
 	response = call(http.MethodPost, "/api/admin/users/"+targetID+"/roles", `{"roleId":"00000000-0000-4000-8000-000000000003","venueId":"venue-test"}`)
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("assign role: %d %s", response.Code, response.Body.String())
@@ -343,18 +367,18 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	exec(`INSERT INTO user_roles(id,user_id,role_id,assignment_type) VALUES($1,$2,$3,'global')`, uuid.NewString(), ids[0], adminRole)
 
 	started, resume := make(chan struct{}), make(chan struct{})
-	server.Identity = testIdentityProvider(func(ctx context.Context, _, _, _, _ string) (string, error) {
+	server.Identity = testIdentityProvider{send: func(ctx context.Context, email, _ string) (*workos.UserInvite, error) {
 		close(started)
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return nil, ctx.Err()
 		case <-resume:
-			return "workos-slow", nil
+			return &workos.UserInvite{ID: "inv-slow", Email: email}, nil
 		}
-	})
+	}}
 	result := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
-		result <- call(http.MethodPost, "/api/admin/users", `{"email":"slow@example.com","displayName":"Slow","password":"test-password"}`)
+		result <- call(http.MethodPost, "/api/admin/users", `{"email":"slow@example.com","displayName":"Slow"}`)
 	}()
 	select {
 	case <-started:
@@ -385,7 +409,7 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 		t.Fatalf("slow WorkOS call blocked revocation or bypassed final check: %v %d", revokeErr, response.Code)
 	}
 	var finalized bool
-	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE workos_id='workos-slow')`).Scan(&finalized); err != nil || finalized {
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE workos_invitation_id='inv-slow')`).Scan(&finalized); err != nil || finalized {
 		t.Fatalf("revoked administrator finalized the user: %v %v", finalized, err)
 	}
 	exec(`INSERT INTO user_roles(id,user_id,role_id,assignment_type) VALUES($1,$2,$3,'global')`, uuid.NewString(), ids[0], adminRole)

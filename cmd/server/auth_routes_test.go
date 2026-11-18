@@ -53,3 +53,13 @@ func TestEventRoutesRequireSession(t *testing.T) {
 		t.Errorf("health check: got %d, want 200", health.Code)
 	}
 }
+
+func TestPublicSignupUnavailable(t *testing.T) {
+	mux := http.NewServeMux()
+	registerAuthRoutes(mux, &auth.Server{})
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/auth/signup", nil))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("signup status = %d, want 404", response.Code)
+	}
+}

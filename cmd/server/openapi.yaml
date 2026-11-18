@@ -22,25 +22,57 @@ paths:
         '401': {description: Authentication required}
         '403': {description: Permission denied}
     post:
-      summary: Provision inactive WorkOS and local user (users.manage)
-      description: Requires matching Origin. Creates an unverified WorkOS identity with an initial password and an inactive local user. No invitation is sent.
+      summary: Invite a user (users.manage)
+      description: Requires matching Origin. Initial roles also require roles.assign and venue grants require venues.manage_access. WorkOS sends an application invitation. The local account stays inactive until WorkOS confirms acceptance and an Admin activates it.
       security: [{SessionCookie: []}]
+      parameters:
+        - {name: Idempotency-Key, in: header, required: true, schema: {type: string, format: uuid}}
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [email, displayName, password]
+              additionalProperties: false
+              required: [email, displayName]
               properties:
-                email: {type: string, format: email}
-                displayName: {type: string}
-                password: {type: string, format: password, writeOnly: true, maxLength: 1024}
+                email: {type: string, format: email, maxLength: 254}
+                displayName: {type: string, maxLength: 200}
+                roles:
+                  type: array
+                  maxItems: 50
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [roleId]
+                    properties:
+                      roleId: {type: string, format: uuid}
+                      venueId: {type: string, nullable: true, maxLength: 64}
       responses:
-        '204': {description: User provisioned or already finalized}
-        '409': {description: A provisioning attempt already exists with different details}
-        '403': {description: Forbidden}
-        '503': {description: Provisioning unavailable. Retry with the same account details.}
+        '204': {description: Invitation delivered and pending local user recorded}
+        '400': {description: Invalid request or invitation details rejected by WorkOS}
+        '401': {description: Authentication required}
+        '403': {description: Origin or grant not authorized}
+        '404': {description: Role or venue not found}
+        '409': {description: Conflicting operation or existing local account}
+        '415': {description: Expected application/json}
+        '503': {description: Invitation could not be finalized. Retry with the same key and request.}
+  /api/admin/users/{id}/invitation/resend:
+    post:
+      summary: Resend or replace an invitation (users.manage)
+      description: Resends a pending invitation or replaces an expired one. Requires matching Origin.
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: Idempotency-Key, in: header, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '204': {description: Invitation sent}
+        '400': {description: Invalid request or invitation rejected by WorkOS}
+        '401': {description: Authentication required}
+        '403': {description: Origin or permission denied}
+        '404': {description: No pending local invitation for this user}
+        '409': {description: Invitation can no longer be resent or operation conflicts}
+        '503': {description: Invitation could not be finalized. Retry with the same key.}
   /api/admin/users/{id}:
     get:
       summary: Get user and assigned roles (users.view)
@@ -114,12 +146,14 @@ paths:
         '200': {description: Venue details}
   /api/admin/users/{id}/activate:
     post:
-      summary: Activate a local user (users.manage)
+      summary: Activate a linked, unarchived local user (users.manage)
       security: [{SessionCookie: []}]
       parameters:
         - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
       responses:
         '204': {description: Activated}
+        '403': {description: Origin or retained grants exceed the acting admin’s authority}
+        '404': {description: Target missing, archived, or awaiting invitation acceptance}
   /api/admin/users/{id}/deactivate:
     post:
       summary: Deactivate a user and remove local sessions (users.manage)
@@ -182,26 +216,6 @@ paths:
         - {name: id, in: path, required: true, schema: {type: string}}
       responses:
         '200': {description: Venue users}
-  /auth/signup:
-    post:
-      summary: Temporarily create a WorkOS password account
-      description: Requires an Origin matching APP_URL. Sign in afterward to verify email and create the local user.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [email, password]
-              properties:
-                email: {type: string, format: email}
-                password: {type: string, format: password}
-      responses:
-        '204': {description: WorkOS account created}
-        '400': {description: Invalid details or account cannot be created}
-        '403': {description: Invalid origin}
-        '429': {description: Signup limit reached; retry after the indicated delay}
-        '503': {description: Signup temporarily unavailable}
   /auth/password:
     post:
       summary: Sign in with email and password
@@ -221,7 +235,7 @@ paths:
         '202': {description: Email verification required; an encrypted challenge cookie is set}
         '400': {description: Invalid request}
         '401': {description: Sign-in failed or requires additional verification}
-        '403': {description: Invalid origin}
+        '403': {description: Invalid origin or no eligible local account}
         '429': {description: Too many attempts}
         '503': {description: Authentication unavailable}
   /auth/verify-email:

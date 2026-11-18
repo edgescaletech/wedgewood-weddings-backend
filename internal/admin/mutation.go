@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"mime"
 	"net/http"
 	"strings"
@@ -18,7 +19,7 @@ var (
 	errForbidden         = errors.New("permission denied")
 	errInvalid           = errors.New("invalid request")
 	errNotFound          = errors.New("not found")
-	errProvisionConflict = errors.New("provisioning already started with different account details")
+	errProvisionConflict = errors.New("invitation operation conflicts with account details or current state")
 	errConflict          = errors.New("change would remove the last effective administrator")
 )
 
@@ -33,35 +34,38 @@ func (server *Server) mutate(writer http.ResponseWriter, request *http.Request, 
 		respond(writer, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
 		return
 	}
-	ctx := request.Context()
-	tx, err := server.DB.BeginTx(ctx, nil)
-	if err != nil {
-		mutationError(writer, err)
-		return
-	}
-	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(87239651)`); err == nil {
-		var allowed bool
-		allowed, err = authorization.HasGlobalPermissionTx(ctx, tx, actor.ID, permission)
-		if err == nil && !allowed {
-			err = errForbidden
-		}
-	}
-	if err == nil {
-		err = change(ctx, tx, actor.ID)
-	}
-	if err == nil {
-		err = ensureAdministrator(ctx, tx)
-	}
-	if err == nil {
-		err = tx.Commit()
-	}
-	if err != nil {
+	if err := server.runMutation(request.Context(), actor.ID, permission, change); err != nil {
 		mutationError(writer, err)
 		return
 	}
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *Server) runMutation(ctx context.Context, actorID, permission string, change func(context.Context, *sql.Tx, string) error) error {
+	tx, err := server.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(87239651)`); err != nil {
+		return err
+	}
+	allowed, err := authorization.HasGlobalPermissionTx(ctx, tx, actorID, permission)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return errForbidden
+	}
+	if err := change(ctx, tx, actorID); err != nil {
+		return err
+	}
+	if err := ensureAdministrator(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ensureAdministrator requires an active global user with every management permission.
@@ -144,7 +148,7 @@ func decodeMutation(writer http.ResponseWriter, request *http.Request, target an
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 16<<10))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(target) != nil {
+	if decoder.Decode(target) != nil || decoder.Decode(new(any)) != io.EOF {
 		respond(writer, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return false
 	}

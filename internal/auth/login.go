@@ -3,7 +3,8 @@ package auth
 import (
 	"crypto/sha256"
 	"crypto/subtle"
-	"github.com/google/uuid"
+	"database/sql"
+	"errors"
 	workos "github.com/workos/workos-go/v7"
 	"net/http"
 	"strings"
@@ -92,6 +93,18 @@ func (server *Server) createSession(writer http.ResponseWriter, request *http.Re
 		return
 	}
 
+	// Resolve an existing account, or a pending invitation whose recipient
+	// WorkOS can prove is this exact authenticated subject.
+	account, err := server.loginAccount(request.Context(), response.User)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			fail(writer, http.StatusForbidden, "account unavailable; contact your administrator")
+		} else {
+			fail(writer, http.StatusServiceUnavailable, "authentication unavailable")
+		}
+		return
+	}
+
 	// Encrypt the WorkOS tokens before storing them in PostgreSQL.
 	sealed, err := workos.SealSessionFromAuthResponse(
 		response.AccessToken,
@@ -121,15 +134,27 @@ func (server *Server) createSession(writer http.ResponseWriter, request *http.Re
 	}
 
 	defer transaction.Rollback()
-	// New users start inactive; signing in never changes existing account status.
-	_, err = transaction.ExecContext(
-		request.Context(),
-		`INSERT INTO users (id,workos_id,email,is_active) VALUES ($1,$2,$3,FALSE)
-   ON CONFLICT (workos_id) DO UPDATE SET email=EXCLUDED.email, updated_at=now()`,
-		uuid.NewString(),
-		c.Subject,
-		response.User.Email,
-	)
+	// Bind the verified identity atomically with session creation. An archived
+	// account or a changed invitation cannot be revived by an in-flight sign-in.
+	result, err := transaction.ExecContext(request.Context(),
+		`UPDATE users SET workos_id=$1,email=$2,updated_at=now()
+   WHERE id=$3 AND archived_at IS NULL
+     AND (($4::text IS NULL AND workos_id=$1) OR (workos_id IS NULL AND workos_invitation_id=$4))`,
+		c.Subject, response.User.Email, account.id, account.invitationID)
+	if err == nil {
+		var count int64
+		count, err = result.RowsAffected()
+		if err == nil && count == 0 {
+			fail(writer, http.StatusForbidden, "account unavailable; contact your administrator")
+			return
+		}
+	}
+	if err == nil && account.invitationID.Valid {
+		_, err = transaction.ExecContext(request.Context(), `INSERT INTO audit_logs
+   (id,action,target_type,target_id,metadata) VALUES
+   (gen_random_uuid(),'user.invitation.accept','user',$1,jsonb_build_object('invitationId',$2::text))`,
+			account.id, account.invitationID)
+	}
 
 	if err == nil {
 		_, err = transaction.ExecContext(

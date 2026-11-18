@@ -385,18 +385,7 @@ func main() {
 	mux.Handle("/api/events/", authServer.Middleware(eventByIDHandler(db, sf)))
 	mux.Handle("/api/sync/events", authServer.Middleware(syncEventsHandler(syncWorker)))
 
-	mux.HandleFunc("/auth/login", authServer.Login)
-	mux.HandleFunc("/auth/password", authServer.PasswordLogin)
-
-	// Temporary signup endpoint; remove this route to disable account creation.
-	mux.Handle("/auth/signup", authServer.SignupRateLimit(http.HandlerFunc(authServer.Signup)))
-
-	mux.HandleFunc("/auth/verify-email", authServer.VerifyEmail)
-	mux.HandleFunc("/auth/forgot-password", authServer.ForgotPassword)
-	mux.HandleFunc("/auth/reset-password", authServer.ResetPassword)
-	mux.HandleFunc("/auth/callback", authServer.Callback)
-	mux.HandleFunc("/auth/logout", authServer.Logout)
-	mux.Handle("/auth/me", authServer.Middleware(http.HandlerFunc(authServer.Me)))
+	registerAuthRoutes(mux, authServer)
 	mux.HandleFunc("/docs", docsHandler)
 	mux.HandleFunc("/openapi.yaml", openAPIHandler)
 
@@ -408,7 +397,7 @@ func main() {
 			w.Header().Add("Vary", "Origin")
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -425,4 +414,16 @@ func main() {
 	if err := http.ListenAndServe(addr, handler); err != nil {
 		log.Fatalf("server: %v", err)
 	}
+}
+
+func registerAuthRoutes(mux *http.ServeMux, authServer *auth.Server) {
+	mux.HandleFunc("/auth/login", authServer.Login)
+	mux.HandleFunc("/auth/password", authServer.PasswordLogin)
+
+	mux.HandleFunc("/auth/verify-email", authServer.VerifyEmail)
+	mux.HandleFunc("/auth/forgot-password", authServer.ForgotPassword)
+	mux.HandleFunc("/auth/reset-password", authServer.ResetPassword)
+	mux.HandleFunc("/auth/callback", authServer.Callback)
+	mux.HandleFunc("/auth/logout", authServer.Logout)
+	mux.Handle("/auth/me", authServer.Middleware(http.HandlerFunc(authServer.Me)))
 }

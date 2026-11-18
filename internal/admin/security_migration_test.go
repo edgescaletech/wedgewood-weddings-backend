@@ -59,6 +59,12 @@ func TestSecurityMigrationIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runner.Close()
+	if err := runner.Migrate(3); err != nil {
+		t.Fatal(err)
+	}
+	if version, dirty, err := runner.Version(); err != nil || version != 3 || dirty {
+		t.Fatalf("starting version=%d dirty=%v err=%v", version, dirty, err)
+	}
 	if err := runner.Migrate(6); err != nil {
 		t.Fatal(err)
 	}
@@ -128,5 +134,21 @@ func TestSecurityMigrationIntegration(t *testing.T) {
 	if err := db.QueryRow(`SELECT to_regclass('user_permission_overrides') IS NULL`).Scan(&absent); err != nil || !absent {
 		t.Fatalf("override table still present: %v %v", absent, err)
 	}
+	// Exercise the production invitation migration after starting at dev's 003.
+	if _, err := db.Exec(`UPDATE users SET archived_at=now() WHERE id=$1`, otherID); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Migrate(7); err != nil {
+		t.Fatal(err)
+	}
+	var active bool
+	if err := db.QueryRow(`SELECT is_active FROM users WHERE id=$1`, otherID).Scan(&active); err != nil || active {
+		t.Fatalf("archived state was not normalized: active=%v err=%v", active, err)
+	}
+	var retainedID string
+	if err := db.QueryRow(`SELECT resource_id FROM user_roles WHERE id=$1`, assignmentID).Scan(&retainedID); err != nil || retainedID != venueA {
+		t.Fatalf("invitation migration changed existing grant: %q %v", retainedID, err)
+	}
+
 	assertHistory()
 }

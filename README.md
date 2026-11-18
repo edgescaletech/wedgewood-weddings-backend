@@ -73,29 +73,29 @@ Go HTTP API for the venue scheduling prototype. Salesforce provides event data; 
 
 Admin endpoints require an active session and the relevant global permission. Mutations require an `Origin` matching `APP_URL`, and JSON bodies where applicable. They serialize privileged changes, recheck the actor's permissions, write an audit record in the same transaction, and reject changes that leave no active administrator with all management permissions. Users cannot modify their own privileged assignments. An actor can grant only permissions they currently hold.
 
-`POST /api/admin/users` accepts `email`, `displayName`, and `password`, creates an unverified WorkOS identity with that password, and creates an inactive local user. WorkOS stores the password; PostgreSQL stores the linked identity and application details. The full display name is also sent as the WorkOS first name because the installed SDK exposes separate first and last name fields. No invitation is sent. Retry a failed request with the same email, display name, and initial password. PostgreSQL saves an operation ID before the WorkOS call. The server uses that ID to find the exact remote identity on retry, then rechecks the acting Admin's permission before committing the local user and audit record together. An unrelated WorkOS account with the same email requires operator review. `PATCH /api/admin/users/{id}` updates the local `displayName`; WorkOS controls identity details. `DELETE` archives the account locally and removes its local sessions; it does not delete the WorkOS identity. An archived account cannot be reactivated through the API.
+`POST /api/admin/users` accepts `email`, `displayName`, and optional `roles` (an array of `{roleId, venueId}` assignments). Send a client-generated UUID in the `Idempotency-Key` header. The same key and request can retry an incomplete invitation. Use a fresh key for a separate invitation or corrected request after a definitive `400`. Reusing a key with different details or independently inviting the same account returns `409`. Initial roles use the same authorization and audit rules as standalone assignments.
+
+WorkOS sends a hosted invitation. The invitee follows the email link, sets their password, and completes verification using the invited email. On sign-in, PostgreSQL links the pending local account only if WorkOS reports the stored invitation was accepted by the verified session subject. The link preserves the Admin-supplied display name, roles, and inactive status. An Admin then activates the linked account via `POST /api/admin/users/{id}/activate`. Subsequent sign-ins use the existing WorkOS identity. Archived accounts cannot accept or activate.
+
+Use `POST /api/admin/users/{id}/invitation/resend` with a new idempotency key to resend a pending invitation or replace an expired one. Retrying that resend uses the same key. If delivery succeeds but local finalization fails, a retry uses the persisted WorkOS invitation ID and rechecks the Admin's permissions. If WorkOS delivery remains ambiguous after one hour, inspect the attempt in `user_invitation_operations` and reconcile the original delivery with WorkOS before any operator changes. Preserve the operation and verify the WorkOS invitation ID from provider records before resuming. A separate create request will not replace it.
+
+`PATCH /api/admin/users/{id}` updates the local display name. `DELETE /api/admin/users/{id}` archives the local account and removes local sessions. Migration 007 enforces an inactive state for archived users and permits pending users without a WorkOS ID. Upgrade with the original `003_event_sync_tracking` files from `dev` and migrations 004–007. Stop the old backend before applying 007, then start the invitation-only backend and deploy the frontend without signup.
 
 Role assignments use `POST /api/admin/users/{id}/roles` with `roleId` and optional `venueId`; removal uses `DELETE /api/admin/users/{id}/roles/{assignmentId}`. V1 exposes read-only role definitions and permission mappings. Authorized operators can configure them in PostgreSQL. Reactivating a user requires authority over the permissions in every retained role. Roles on suspended resources require global authority because these grants can resume after reopening. The roles and effective-permissions endpoints show access from assigned roles. Effective permissions accept an optional `venueId` query parameter. User-specific overrides and their API routes have been removed. The effective-permissions response no longer includes `override`; `inherited` and `effective` both report role-derived access.
 
-After applying the Admin migrations, use your operator SQL script to activate the first WorkOS-linked local user and assign the global Admin role in one transaction. The user must already exist in the local `users` table. Use `assignment_type = 'global'` and `resource_id = NULL` for the global assignment. Subsequent access management uses the Admin API.
+After applying the Admin migrations, use your operator SQL script to activate the first WorkOS-linked local user and assign the global Admin role in one transaction. For a fresh environment, an operator must first create or invite the first Admin in WorkOS, verify the accepted WorkOS user ID in the dashboard, and insert the corresponding local user with that ID through private database access. Use `assignment_type = 'global'` and `resource_id = NULL` for the global assignment. Subsequent access management uses the Admin API.
 
 Existing venue identifiers are Salesforce text IDs, not UUIDs. A resource permission check requires an active local user and active registry entry. It combines grants from global roles and roles assigned directly to that resource. Administrative permissions use an explicit global check. Existing event routes remain authenticated but are not yet governed by scheduling permissions.
 
 1. Navigate the browser to `GET /auth/login` on the backend. It redirects to the hosted WorkOS AuthKit sign-in page.
 2. WorkOS redirects to `GET /auth/callback`. The backend checks OAuth state, exchanges the code, verifies the access token, and links the user by their immutable WorkOS user ID.
-3. The backend creates an inactive local user if one does not already exist, establishes a session, and redirects the browser to `APP_URL`. Existing users retain their current active status.
+3. The backend checks for an existing account or a verified, accepted invitation before establishing a session and redirecting to `APP_URL`. Account status remains controlled locally.
 4. Inactive existing users must be activated by a privately authorized operator. See [Activate a user](#activate-a-user).
 5. The frontend can call `GET /auth/me` with credentials to retrieve the active local identity.
 
-### Temporary signup
+### Invitation-only WorkOS setup
 
-Open `/signup/` on the frontend to create an account. The page sends email and password to `POST /auth/signup`, which creates an unverified WorkOS user. The password is handled by WorkOS and is not saved in PostgreSQL. After signup, sign in using the existing login page; WorkOS can require email verification, and the local user is created on the first successful sign-in.
-
-To disable signup later, remove the `/auth/signup` route in `cmd/server/main.go` and deploy the backend; deleting the frontend page alone does not disable the API. Then remove the signup handler, rate limiter, tests and OpenAPI entry, the frontend `signup/` directory, and its entry in `vite.config.js`.
-
-Signup is limited to 15 POST requests per 10 minutes per server process using an in-memory counter. A full window returns `429` with `Retry-After`. The counter resets on restart and is not shared between instances. It does not distinguish clients, so one busy or abusive client can temporarily block everyone on that instance. Use a trusted edge per-IP rate limiter for public deployment.
-
-New local users are created inactive. An authorized administrator must activate them and assign the appropriate role and venue before they receive Admin API access. Existing users retain their current active status.
+In the WorkOS dashboard, turn off **Sign up** in **Authentication** for each environment. Enable WorkOS invitation delivery and hosted email/password authentication. Use the hosted AuthKit invitation link and the configured callback URL to complete registration. The dashboard settings apply per environment. See [WorkOS invite-only signup](https://workos.com/docs/authkit/invite-only-signup) and [WorkOS invitations](https://workos.com/docs/authkit/invitations).
 
 ### Custom sign-in, verification, and password recovery
 
@@ -130,6 +130,7 @@ SELECT workos_id, email, is_active FROM users;
 UPDATE users
 SET is_active = true, updated_at = now()
 WHERE workos_id = 'user_verified_workos_id'
+  AND archived_at IS NULL
 RETURNING workos_id, email, is_active;
 ```
 
@@ -140,7 +141,6 @@ Copy the complete ID, not a truncated value from a table display. Activation req
 | Route | Purpose | Access |
 | --- | --- | --- |
 | `GET /healthz` | Health check | Public |
-| `POST /auth/signup` | Temporarily create a WorkOS password account | Public; matching `Origin` required |
 | `POST /auth/password` | Sign in with email and password | Public; matching `Origin` required |
 | `POST /auth/verify-email` | Complete an email verification challenge | Public; challenge cookie and matching `Origin` required |
 | `POST /auth/forgot-password` | Request a reset email | Public; matching `Origin` required |

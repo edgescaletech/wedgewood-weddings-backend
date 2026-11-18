@@ -18,6 +18,7 @@ func (server *Server) registerMutations(mux *http.ServeMux) {
 	}
 	register("POST /api/admin/users/{id}/activate", "users.manage", server.activate)
 	register("POST /api/admin/users", "users.manage", server.createUser)
+	register("POST /api/admin/users/{id}/invitation/resend", "users.manage", server.resendInvitation)
 	register("POST /api/admin/users/{id}/deactivate", "users.manage", server.deactivate)
 	register("DELETE /api/admin/users/{id}", "users.manage", server.archive)
 	register("PATCH /api/admin/users/{id}", "users.manage", server.updateUser)
@@ -29,62 +30,81 @@ func (server *Server) registerMutations(mux *http.ServeMux) {
 }
 
 func (server *Server) assignRole(writer http.ResponseWriter, request *http.Request) {
-	var input struct {
-		RoleID  string  `json:"roleId"`
-		VenueID *string `json:"venueId"`
-	}
+	var input roleGrant
 	if !decodeMutation(writer, request, &input) {
 		return
 	}
 	userID := request.PathValue("id")
 	server.mutate(writer, request, "roles.assign", func(ctx context.Context, tx *sql.Tx, actor string) error {
-		if !validID(userID) || !validID(input.RoleID) || (input.VenueID != nil && (*input.VenueID == "" || len(*input.VenueID) > 64)) {
-			return errInvalid
-		}
-		if sameUser(actor, userID) {
-			return errForbidden
-		}
-		var scope string
-		if err := tx.QueryRowContext(ctx, `SELECT assignment_type FROM roles WHERE id=$1`, input.RoleID).Scan(&scope); err != nil {
-			return err
-		}
-		if (input.VenueID == nil && scope != "global") || (input.VenueID != nil && scope != "venue") {
-			return errInvalid
-		}
-		var resource *resourceScope
-		if input.VenueID != nil {
-			allowed, err := authorization.HasGlobalPermissionTx(ctx, tx, actor, "venues.manage_access")
-			if err != nil {
-				return err
-			}
-			if !allowed {
-				return errForbidden
-			}
-			resource = &resourceScope{resourceType: scope, externalID: *input.VenueID}
-			var active bool
-			if err := tx.QueryRowContext(ctx, `SELECT id, is_active FROM rbac_resources
-				WHERE resource_type=$1 AND external_id=$2 FOR SHARE`, scope, resource.externalID).Scan(&resource.id, &active); err != nil {
-				return err
-			}
-			if !active {
-				return errInvalid
-			}
-		}
-		if err := checkGrantCeiling(ctx, tx, actor, input.RoleID, resource); err != nil {
-			return err
-		}
-		assignmentID := uuid.NewString()
-		var resourceID *string
-		if resource != nil {
-			resourceID = &resource.id
-		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO user_roles(id,user_id,role_id,assignment_type,resource_id,assigned_by)
-			VALUES($1,$2,$3,$4,$5,$6)`, assignmentID, userID, input.RoleID, scope, resourceID, actor)
-		if err != nil {
-			return constraintError(err)
-		}
-		return audit(ctx, tx, actor, "role.assign", "user", userID, resource, map[string]any{"roleId": input.RoleID, "assignmentId": assignmentID, "outcome": "success"})
+		return assignGrant(ctx, tx, actor, userID, input)
 	})
+}
+
+type roleGrant struct {
+	RoleID  string  `json:"roleId"`
+	VenueID *string `json:"venueId"`
+}
+
+// assignGrant applies the same authorization and audit rules to standalone and invitation grants.
+func assignGrant(ctx context.Context, tx *sql.Tx, actor, userID string, grant roleGrant) error {
+	if !validID(userID) || !validID(grant.RoleID) {
+		return errInvalid
+	}
+	if sameUser(actor, userID) {
+		return errForbidden
+	}
+	scope, resource, err := validateGrant(ctx, tx, actor, grant.RoleID, grant.VenueID)
+	if err != nil {
+		return err
+	}
+	assignmentID := uuid.NewString()
+	var resourceID *string
+	if resource != nil {
+		resourceID = &resource.id
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO user_roles(id,user_id,role_id,assignment_type,resource_id,assigned_by)
+			VALUES($1,$2,$3,$4,$5,$6)`, assignmentID, userID, grant.RoleID, scope, resourceID, actor)
+	if err != nil {
+		return constraintError(err)
+	}
+	return audit(ctx, tx, actor, "role.assign", "user", userID, resource, map[string]any{"roleId": grant.RoleID, "assignmentId": assignmentID, "outcome": "success"})
+}
+
+// validateGrant resolves and locks the resource before checking the actor's ceiling.
+func validateGrant(ctx context.Context, tx *sql.Tx, actor, roleID string, venueID *string) (string, *resourceScope, error) {
+	if venueID != nil && (*venueID == "" || len(*venueID) > 64) {
+		return "", nil, errInvalid
+	}
+	var scope string
+	if err := tx.QueryRowContext(ctx, `SELECT assignment_type FROM roles WHERE id=$1`, roleID).Scan(&scope); err != nil {
+		return "", nil, err
+	}
+	if (venueID == nil && scope != "global") || (venueID != nil && scope != "venue") {
+		return "", nil, errInvalid
+	}
+	var resource *resourceScope
+	if venueID != nil {
+		allowed, err := authorization.HasGlobalPermissionTx(ctx, tx, actor, "venues.manage_access")
+		if err != nil {
+			return "", nil, err
+		}
+		if !allowed {
+			return "", nil, errForbidden
+		}
+		resource = &resourceScope{resourceType: scope, externalID: *venueID}
+		var active bool
+		if err := tx.QueryRowContext(ctx, `SELECT id, is_active FROM rbac_resources
+				WHERE resource_type=$1 AND external_id=$2 FOR SHARE`, scope, resource.externalID).Scan(&resource.id, &active); err != nil {
+			return "", nil, err
+		}
+		if !active {
+			return "", nil, errInvalid
+		}
+	}
+	if err := checkGrantCeiling(ctx, tx, actor, roleID, resource); err != nil {
+		return "", nil, err
+	}
+	return scope, resource, nil
 }
 
 func (server *Server) removeRole(writer http.ResponseWriter, request *http.Request) {
