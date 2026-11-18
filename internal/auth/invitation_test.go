@@ -9,6 +9,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/lib/pq"
 	workos "github.com/workos/workos-go/v7"
 )
 
@@ -70,5 +71,30 @@ func TestInvitationLoginRequiresExactAcceptedIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestSignInWithConflictingEmailReturnsConflict(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	server := Server{database: db, config: Config{CookiePassword: strings.Repeat("a", 32)}, verify: func(context.Context, string) (*claims, error) {
+		return &claims{RegisteredClaims: jwt.RegisteredClaims{Subject: "linked-user"}}, nil
+	}}
+	mock.ExpectQuery("SELECT id FROM users WHERE workos_id").WithArgs("linked-user").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("local"))
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE users SET workos_id").WillReturnError(&pq.Error{Code: "23505", Constraint: "users_email_owner"})
+	mock.ExpectRollback()
+	writer := httptest.NewRecorder()
+	server.createSession(writer, httptest.NewRequest(http.MethodPost, "/auth/password", nil), &workos.AuthenticateResponse{
+		User: &workos.User{ID: "linked-user", Email: "owned@example.com", EmailVerified: true}, AccessToken: "access", RefreshToken: "refresh",
+	}, true)
+	if writer.Code != http.StatusConflict || writer.Header().Get("Set-Cookie") != "" {
+		t.Fatalf("unexpected sign-in response: %d", writer.Code)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }

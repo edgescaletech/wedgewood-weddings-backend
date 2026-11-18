@@ -5,10 +5,12 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"errors"
-	workos "github.com/workos/workos-go/v7"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/lib/pq"
+	workos "github.com/workos/workos-go/v7"
 )
 
 // Login redirects the browser to AuthKit after storing the encrypted OAuth state.
@@ -141,6 +143,14 @@ func (server *Server) createSession(writer http.ResponseWriter, request *http.Re
    WHERE id=$3 AND archived_at IS NULL
      AND (($4::text IS NULL AND workos_id=$1) OR (workos_id IS NULL AND workos_invitation_id=$4))`,
 		c.Subject, response.User.Email, account.id, account.invitationID)
+	// A concurrent invitation or another linked identity may own this email.
+	// Roll back the identity update before issuing any session.
+	var ownershipError *pq.Error
+	if errors.As(err, &ownershipError) && ownershipError.Code == "23505" && ownershipError.Constraint == "users_email_owner" {
+		fail(writer, http.StatusConflict, "account email conflict; contact your administrator")
+		return
+	}
+
 	if err == nil {
 		var count int64
 		count, err = result.RowsAffected()

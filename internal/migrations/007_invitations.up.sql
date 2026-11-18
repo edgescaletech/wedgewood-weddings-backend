@@ -4,8 +4,7 @@ ALTER TABLE users ALTER COLUMN workos_id DROP NOT NULL;
 ALTER TABLE users ADD COLUMN workos_invitation_id TEXT NOT NULL UNIQUE;
 ALTER TABLE users ADD CONSTRAINT users_active_identity_required
     CHECK (NOT is_active OR (archived_at IS NULL AND workos_id IS NOT NULL));
-CREATE UNIQUE INDEX users_pending_invitation_email ON users (lower(email))
-    WHERE workos_id IS NULL AND archived_at IS NULL;
+CREATE UNIQUE INDEX users_email_owner ON users (lower(email));
 
 CREATE TABLE user_invitation_operations (
     id UUID PRIMARY KEY,
@@ -17,6 +16,7 @@ CREATE TABLE user_invitation_operations (
     prior_invitation_id TEXT,
     invitation_id TEXT,
     delivered_id TEXT,
+    first_attempt_at TIMESTAMPTZ,
     delivery_mode TEXT CHECK (delivery_mode IN ('send', 'resend')),
     rejected_status INTEGER CHECK (rejected_status IN (400, 409)),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

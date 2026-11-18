@@ -46,8 +46,10 @@ func (server *Server) deliverInvitation(ctx context.Context, operation *invitati
 				return errProvisionConflict
 			}
 		}
+		// Commit the attempt marker immediately before dispatch. A crash after
+		// this point is ambiguous even if the provider response never arrives.
 		if err := server.DB.QueryRowContext(deliveryContext, `UPDATE user_invitation_operations
-			SET delivery_mode=COALESCE(delivery_mode,$2) WHERE id=$1 RETURNING delivery_mode`,
+			SET delivery_mode=COALESCE(delivery_mode,$2), first_attempt_at=COALESCE(first_attempt_at,clock_timestamp()) WHERE id=$1 RETURNING delivery_mode`,
 			operation.key, mode).Scan(&operation.mode); err != nil {
 			return err
 		}
@@ -61,8 +63,9 @@ func (server *Server) deliverInvitation(ctx context.Context, operation *invitati
 	}
 	defer tx.Rollback()
 	var rejected sql.NullInt64
-	if err := tx.QueryRowContext(deliveryContext, `SELECT delivered_id,rejected_status FROM user_invitation_operations
-		WHERE id=$1 FOR UPDATE`, operation.key).Scan(&operation.deliveredID, &rejected); err != nil {
+	var withinRetryWindow bool
+	if err := tx.QueryRowContext(deliveryContext, `SELECT delivered_id,rejected_status, first_attempt_at > clock_timestamp() - interval '1 hour' FROM user_invitation_operations
+		WHERE id=$1 FOR UPDATE`, operation.key).Scan(&operation.deliveredID, &rejected, &withinRetryWindow); err != nil {
 		return err
 	}
 	if operation.deliveredID.Valid {
@@ -74,7 +77,7 @@ func (server *Server) deliverInvitation(ctx context.Context, operation *invitati
 
 	// Old ambiguous operations require provider-side reconciliation before any
 	// more writes. The application cannot assume WorkOS retains keys forever.
-	if time.Since(operation.createdAt) > time.Hour {
+	if !withinRetryWindow {
 		return errInvitationUnavailable
 	}
 

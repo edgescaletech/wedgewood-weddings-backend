@@ -35,6 +35,7 @@ type testTransport func(*http.Request) (*http.Response, error)
 
 type testIdentityProvider struct {
 	send       func(context.Context, string, string) (*workos.UserInvite, error)
+	lookupErr  error
 	priorState workos.UserInviteState
 }
 
@@ -42,7 +43,7 @@ func (provider testIdentityProvider) Send(ctx context.Context, email, key string
 	return provider.send(ctx, email, key)
 }
 func (provider testIdentityProvider) Get(_ context.Context, id string) (*workos.UserInvite, error) {
-	return &workos.UserInvite{ID: id, Email: "new@example.com", State: provider.priorState}, nil
+	return &workos.UserInvite{ID: id, Email: "new@example.com", State: provider.priorState}, provider.lookupErr
 }
 func (provider testIdentityProvider) Resend(_ context.Context, id, _ string) (*workos.UserInvite, error) {
 	return &workos.UserInvite{ID: id, Email: "new@example.com"}, nil
@@ -226,6 +227,12 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	t.Run("invitation safeguards", func(t *testing.T) {
 		testInvitationSafeguards(t, db, server, callWithKey)
 	})
+	t.Run("concurrent invitation delivery", func(t *testing.T) {
+		testConcurrentInvitationDelivery(t, db, server, callWithKey)
+	})
+	t.Run("concurrent email ownership", func(t *testing.T) {
+		testConcurrentEmailOwnership(t, db, server, callWithKey)
+	})
 	for _, body := range []string{`{}`, `{"displayName":null}`, `{"displayName":""}`, `{"displayName":"  "}`} {
 		if response := call(http.MethodPatch, "/api/admin/users/"+ids[1], body); response.Code != http.StatusBadRequest {
 			t.Fatalf("invalid profile %s: %d", body, response.Code)
@@ -277,9 +284,40 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 		t.Fatalf("unaccepted activation: %d", response.Code)
 	}
 	resendPath := "/api/admin/users/" + invitedID + "/invitation/resend"
-	if response := call(http.MethodPost, resendPath, ""); response.Code != http.StatusNoContent {
-		t.Fatalf("resend: %d %s", response.Code, response.Body)
-	}
+	t.Run("lookup failures do not start the resend window", func(t *testing.T) {
+		key := uuid.NewString()
+		server.Identity = testIdentityProvider{lookupErr: errors.New("lookup unavailable")}
+		if response := callWithKey(http.MethodPost, resendPath, "", key); response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("lookup failure: %d", response.Code)
+		}
+		var attempt sql.NullTime
+		if err := db.QueryRow(`UPDATE user_invitation_operations SET created_at=now()-interval '2 hours' WHERE id=$1 RETURNING first_attempt_at`, key).Scan(&attempt); err != nil || attempt.Valid {
+			t.Fatalf("lookup recorded a delivery: %v %v", attempt, err)
+		}
+		server.Identity = testIdentityProvider{priorState: "pending"}
+		if response := callWithKey(http.MethodPost, resendPath, "", key); response.Code != http.StatusNoContent {
+			t.Fatalf("first resend: %d %s", response.Code, response.Body)
+		}
+	})
+	t.Run("ambiguous send expires from first attempt", func(t *testing.T) {
+		key := uuid.NewString()
+		body := `{"email":"timeout@example.com","displayName":"Timeout"}`
+		attempts := 0
+		server.Identity = testIdentityProvider{send: func(context.Context, string, string) (*workos.UserInvite, error) {
+			attempts++
+			return nil, errors.New("ambiguous response")
+		}}
+		for range 2 {
+			if response := callWithKey(http.MethodPost, "/api/admin/users", body, key); response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("ambiguous send: %d", response.Code)
+			}
+			exec(`UPDATE user_invitation_operations SET first_attempt_at=now()-interval '2 hours' WHERE id=$1 AND first_attempt_at IS NOT NULL`, key)
+		}
+		if attempts != 1 {
+			t.Fatalf("provider attempts=%d", attempts)
+		}
+	})
+
 	server.Identity = testIdentityProvider{priorState: "expired", send: func(_ context.Context, email, _ string) (*workos.UserInvite, error) {
 		return &workos.UserInvite{ID: "inv-replacement", Email: email}, nil
 	}}

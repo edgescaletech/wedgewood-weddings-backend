@@ -237,6 +237,7 @@ paths:
         '400': {description: Invalid request}
         '401': {description: Sign-in failed or requires additional verification}
         '403': {description: Invalid origin or no eligible local account}
+        '409': {description: Another local account owns this email}
         '429': {description: Too many attempts}
         '503': {description: Authentication unavailable}
   /auth/verify-email:
@@ -255,6 +256,7 @@ paths:
       responses:
         '204': {description: Email verified and session cookie created}
         '401': {description: Invalid or expired challenge}
+        '409': {description: Another local account owns this email}
         '403': {description: Invalid origin}
         '503': {description: Verification temporarily unavailable}
   /auth/forgot-password:
@@ -308,6 +310,7 @@ paths:
       responses:
         '303': {description: Session created; redirect to application}
         '400': {description: Invalid state}
+        '409': {description: Another local account owns this email}
         '401': {description: Authentication failed}
   /auth/me:
     get:

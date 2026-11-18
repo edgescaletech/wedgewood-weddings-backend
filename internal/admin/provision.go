@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/mail"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	workos "github.com/workos/workos-go/v7"
@@ -48,7 +47,6 @@ type invitationOperation struct {
 	key, email, userID                      string
 	priorID, mode, deliveredID, completedID sql.NullString
 	rejectedStatus                          sql.NullInt64
-	createdAt                               time.Time
 	resourceIDs                             []*string
 }
 
@@ -112,8 +110,8 @@ func (server *Server) invite(writer http.ResponseWriter, request *http.Request, 
 				return nil
 			}
 			if userID == "" {
-				if err := operation.validateGrants(ctx, tx, actor, input, true); errors.Is(err, errInvitationVenueChanged) {
-					return operation.rejectChangedVenue(ctx, tx)
+				if err := operation.validateGrants(ctx, tx, actor, input, true); permanentInvitationConflict(err) {
+					return operation.rejectConflict(ctx, tx)
 				} else {
 					return err
 				}
@@ -186,21 +184,27 @@ func (server *Server) invite(writer http.ResponseWriter, request *http.Request, 
 	err = server.runMutation(ctx, actor, "users.manage", func(ctx context.Context, tx *sql.Tx, actor string) error {
 		var completed bool
 		if err := tx.QueryRowContext(ctx, `SELECT invitation_id IS NOT NULL,rejected_status FROM user_invitation_operations
-			WHERE id=$1 FOR UPDATE`, key).Scan(&completed, &operation.rejectedStatus); err != nil || completed || operation.rejectedStatus.Valid {
+			WHERE id=$1 FOR UPDATE NOWAIT`, key).Scan(&completed, &operation.rejectedStatus); err != nil || completed || operation.rejectedStatus.Valid {
 			return err
 		}
 		targetID, action := userID, "user.invite.resend"
 		if userID == "" {
 			action = "user.invite"
-			targetID = uuid.NewString()
 			if err := operation.validateGrants(ctx, tx, actor, input, true); err != nil {
-				if errors.Is(err, errInvitationVenueChanged) {
-					return operation.rejectChangedVenue(ctx, tx)
+				if permanentInvitationConflict(err) {
+					return operation.rejectConflict(ctx, tx)
 				}
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO users(id,email,display_name,workos_invitation_id)
-				VALUES($1,$2,$3,$4)`, targetID, input.Email, input.DisplayName, operation.deliveredID.String); err != nil {
+			// A sign-in can take ownership after the eligibility check. Let the
+			// unique index settle the race without aborting the audit transaction.
+			err := tx.QueryRowContext(ctx, `INSERT INTO users(id,email,display_name,workos_invitation_id)
+				VALUES($1,$2,$3,$4) ON CONFLICT (lower(email)) DO NOTHING RETURNING id`,
+				uuid.NewString(), input.Email, input.DisplayName, operation.deliveredID.String).Scan(&targetID)
+			if errors.Is(err, sql.ErrNoRows) {
+				return operation.rejectConflict(ctx, tx)
+			}
+			if err != nil {
 				return constraintError(err)
 			}
 			for index, grant := range input.Roles {
@@ -240,9 +244,13 @@ func (server *Server) invite(writer http.ResponseWriter, request *http.Request, 
 	writer.WriteHeader(http.StatusNoContent)
 }
 
-func (operation *invitationOperation) rejectChangedVenue(ctx context.Context, tx *sql.Tx) error {
+func permanentInvitationConflict(err error) bool {
+	return errors.Is(err, errInvitationVenueChanged) || errors.Is(err, errProvisionConflict)
+}
+
+func (operation *invitationOperation) rejectConflict(ctx context.Context, tx *sql.Tx) error {
 	// Release the reservation but retain the original operation and any WorkOS
-	// delivery ID. This invitation can never be linked to a replacement venue.
+	// delivery ID for reconciliation.
 	return tx.QueryRowContext(ctx, `UPDATE user_invitation_operations
         SET rejected_status=COALESCE(rejected_status,409)
         WHERE id=$1 AND invitation_id IS NULL RETURNING rejected_status`, operation.key).
@@ -257,13 +265,15 @@ func (operation *invitationOperation) resourceID(index int) *string {
 }
 
 func (operation *invitationOperation) read(ctx context.Context, tx *sql.Tx, payload []byte) (bool, error) {
+	// A delivery can hold this row across a provider call. Fail fast while
+	// holding the shared Admin lock so unrelated mutations can proceed.
 	var matches bool
 	var resourceIDs []byte
 	err := tx.QueryRowContext(ctx, `SELECT email, prior_invitation_id, delivery_mode, delivered_id, invitation_id,
-		rejected_status, created_at, resource_ids, (request=$2::jsonb AND resend_user_id IS NOT DISTINCT FROM NULLIF($3,'')::uuid)
-		FROM user_invitation_operations WHERE id=$1`, operation.key, string(payload), operation.userID).
+		rejected_status, resource_ids, (request=$2::jsonb AND resend_user_id IS NOT DISTINCT FROM NULLIF($3,'')::uuid)
+		FROM user_invitation_operations WHERE id=$1 FOR UPDATE NOWAIT`, operation.key, string(payload), operation.userID).
 		Scan(&operation.email, &operation.priorID, &operation.mode, &operation.deliveredID, &operation.completedID,
-			&operation.rejectedStatus, &operation.createdAt, &resourceIDs, &matches)
+			&operation.rejectedStatus, &resourceIDs, &matches)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
