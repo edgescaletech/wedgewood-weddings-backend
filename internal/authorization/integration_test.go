@@ -45,7 +45,7 @@ func TestPermissionIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, file := range []string{"001_phase1_tables.up.sql", "002_auth.up.sql", "003_admin.up.sql", "004_user_admin.up.sql"} {
+	for _, file := range []string{"001_phase1_tables.up.sql", "002_auth.up.sql", "004_admin.up.sql", "005_user_admin.up.sql"} {
 		migration, err := os.ReadFile(filepath.Join("..", "migrations", file))
 		if err != nil {
 			t.Fatal(err)

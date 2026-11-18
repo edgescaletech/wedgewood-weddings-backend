@@ -1,4 +1,4 @@
--- Keep a dependency on permanent security history so even the historical 003
+-- Keep a dependency on permanent security history so even the historical 004
 -- down script cannot DROP these tables without an explicit destructive CASCADE.
 CREATE VIEW security_history_rollback_guard AS
 SELECT b.singleton, b.completed_at, b.user_id, a.id AS audit_id
