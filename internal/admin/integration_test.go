@@ -226,6 +226,15 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	t.Run("invitation safeguards", func(t *testing.T) {
 		testInvitationSafeguards(t, db, server, callWithKey)
 	})
+	for _, body := range []string{`{}`, `{"displayName":null}`, `{"displayName":""}`, `{"displayName":"  "}`} {
+		if response := call(http.MethodPatch, "/api/admin/users/"+ids[1], body); response.Code != http.StatusBadRequest {
+			t.Fatalf("invalid profile %s: %d", body, response.Code)
+		}
+	}
+	var preservedName string
+	if err := db.QueryRow(`SELECT display_name FROM users WHERE id=$1`, ids[1]).Scan(&preservedName); err != nil || preservedName != "Updated" {
+		t.Fatalf("invalid patch changed profile: %q %v", preservedName, err)
+	}
 	const newUser = `{"email":"new@example.com","displayName":"New user","roles":[{"roleId":"00000000-0000-4000-8000-000000000003","venueId":"venue-test"}]}`
 	invitationKey := uuid.NewString()
 	deliveries := 0

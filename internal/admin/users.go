@@ -70,7 +70,7 @@ func (server *Server) updateUser(writer http.ResponseWriter, request *http.Reque
 	userID := request.PathValue("id")
 	server.mutate(writer, request, "users.manage", func(ctx context.Context, tx *sql.Tx, actor string) error {
 		name := strings.TrimSpace(input.DisplayName)
-		if !validID(userID) || len(name) > 200 {
+		if !validID(userID) || name == "" || len(name) > 200 {
 			return errInvalid
 		}
 		result, err := tx.ExecContext(ctx, `UPDATE users SET display_name=$1,updated_at=now() WHERE id=$2 AND archived_at IS NULL`, name, userID)

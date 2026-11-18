@@ -91,9 +91,10 @@ paths:
         required: true
         content:
           application/json:
-            schema: {type: object, required: [displayName], properties: {displayName: {type: string}}}
+            schema: {type: object, required: [displayName], properties: {displayName: {type: string, minLength: 1, description: Must contain a non-whitespace character}}}
       responses:
         '204': {description: Updated}
+        '400': {description: Missing or invalid display name}
     delete:
       summary: Archive a user and remove local sessions (users.manage)
       security: [{SessionCookie: []}]
