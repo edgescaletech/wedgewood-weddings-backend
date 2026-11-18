@@ -1,9 +1,7 @@
 BEGIN;
 
-UPDATE users SET is_active = FALSE WHERE archived_at IS NOT NULL AND is_active;
-DELETE FROM auth_sessions WHERE workos_id IN (SELECT workos_id FROM users WHERE archived_at IS NOT NULL);
 ALTER TABLE users ALTER COLUMN workos_id DROP NOT NULL;
-ALTER TABLE users ADD COLUMN workos_invitation_id TEXT UNIQUE;
+ALTER TABLE users ADD COLUMN workos_invitation_id TEXT NOT NULL UNIQUE;
 ALTER TABLE users ADD CONSTRAINT users_active_identity_required
     CHECK (NOT is_active OR (archived_at IS NULL AND workos_id IS NOT NULL));
 CREATE UNIQUE INDEX users_pending_invitation_email ON users (lower(email))

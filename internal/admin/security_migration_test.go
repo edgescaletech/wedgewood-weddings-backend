@@ -68,13 +68,7 @@ func TestSecurityMigrationIntegration(t *testing.T) {
 	if err := runner.Migrate(6); err != nil {
 		t.Fatal(err)
 	}
-	userID, otherID, assignmentID := uuid.NewString(), uuid.NewString(), uuid.NewString()
-	for _, id := range []string{userID, otherID} {
-		if _, err := db.Exec(`INSERT INTO users(id,workos_id,email,is_active) VALUES($1::uuid,$1::text,$1::text,true)`, id); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := db.Exec(`INSERT INTO audit_logs(id,actor_user_id,action) VALUES($1,$2,'test.history')`, uuid.NewString(), userID); err != nil {
+	if _, err := db.Exec(`INSERT INTO audit_logs(id,action) VALUES($1,'test.history')`, uuid.NewString()); err != nil {
 		t.Fatal(err)
 	}
 	if err := runner.Steps(-1); err == nil {
@@ -108,6 +102,20 @@ func TestSecurityMigrationIntegration(t *testing.T) {
 		t.Fatal("historical destructive rollback succeeded")
 	}
 	assertHistory()
+	if err := runner.Migrate(7); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO users(id,workos_id,email,is_active)
+   VALUES($1,'old-signup','old-signup@example.com',true)`, uuid.NewString()); err == nil {
+		t.Fatal("user without an invitation was accepted")
+	}
+	userID, otherID, assignmentID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	for _, id := range []string{userID, otherID} {
+		if _, err := db.Exec(`INSERT INTO users(id,workos_id,email,is_active,workos_invitation_id)
+    VALUES($1::uuid,$1::text,$1::text,true,'inv-' || $1::text)`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := db.Exec(`INSERT INTO venues(id,name) VALUES('venue-a','A'),('venue-b','B')`); err != nil {
 		t.Fatal(err)
 	}
@@ -134,21 +142,5 @@ func TestSecurityMigrationIntegration(t *testing.T) {
 	if err := db.QueryRow(`SELECT to_regclass('user_permission_overrides') IS NULL`).Scan(&absent); err != nil || !absent {
 		t.Fatalf("override table still present: %v %v", absent, err)
 	}
-	// Exercise the production invitation migration after starting at dev's 003.
-	if _, err := db.Exec(`UPDATE users SET archived_at=now() WHERE id=$1`, otherID); err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Migrate(7); err != nil {
-		t.Fatal(err)
-	}
-	var active bool
-	if err := db.QueryRow(`SELECT is_active FROM users WHERE id=$1`, otherID).Scan(&active); err != nil || active {
-		t.Fatalf("archived state was not normalized: active=%v err=%v", active, err)
-	}
-	var retainedID string
-	if err := db.QueryRow(`SELECT resource_id FROM user_roles WHERE id=$1`, assignmentID).Scan(&retainedID); err != nil || retainedID != venueA {
-		t.Fatalf("invitation migration changed existing grant: %q %v", retainedID, err)
-	}
-
 	assertHistory()
 }

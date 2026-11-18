@@ -25,7 +25,9 @@ func (provider workOS) GetInvitation(ctx context.Context, id string) (*workos.Us
 
 func (server *Server) loginAccount(ctx context.Context, user *workos.User) (loginAccount, error) {
 	var account loginAccount
-	err := server.database.QueryRowContext(ctx, `SELECT id FROM users WHERE workos_id=$1 AND archived_at IS NULL`, user.ID).Scan(&account.id)
+	// The schema requires an invitation for every account. Returning users
+	// authenticate with the WorkOS ID already linked during onboarding.
+	err := server.database.QueryRowContext(ctx, `SELECT id FROM users WHERE workos_id=$1 AND archived_at IS NULL AND workos_invitation_id IS NOT NULL`, user.ID).Scan(&account.id)
 	if !errors.Is(err, sql.ErrNoRows) || !user.EmailVerified {
 		return account, err
 	}
@@ -33,13 +35,10 @@ func (server *Server) loginAccount(ctx context.Context, user *workos.User) (logi
 	// Email locates a candidate only. WorkOS must attest acceptance by the
 	// exact user ID in the cryptographically verified authentication response.
 	err = server.database.QueryRowContext(ctx, `SELECT id,workos_invitation_id FROM users
-		WHERE workos_id IS NULL AND archived_at IS NULL AND lower(email)=$1`,
+		WHERE workos_id IS NULL AND archived_at IS NULL AND workos_invitation_id IS NOT NULL AND lower(email)=$1`,
 		strings.ToLower(user.Email)).Scan(&account.id, &account.invitationID)
 	if err != nil {
 		return account, err
-	}
-	if !account.invitationID.Valid {
-		return account, sql.ErrNoRows
 	}
 	reader, ok := server.provider.(invitationReader)
 	if !ok {

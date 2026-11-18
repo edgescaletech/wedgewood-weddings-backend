@@ -94,7 +94,7 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	}
 	ids := []string{uuid.NewString(), uuid.NewString()}
 	for index, id := range ids {
-		if _, err = db.Exec(`INSERT INTO users(id,workos_id,email,is_active) VALUES($1,$2,$2,true)`, id, "workos-"+string(rune('a'+index))); err != nil {
+		if _, err = db.Exec(`INSERT INTO users(id,workos_id,email,is_active,workos_invitation_id) VALUES($1,$2,$2,true,'inv-' || $2)`, id, "workos-"+string(rune('a'+index))); err != nil {
 			t.Fatal(err)
 		}
 		if _, err = db.Exec(`INSERT INTO user_roles(id,user_id,role_id,assignment_type) VALUES($1,$2,'00000000-0000-4000-8000-000000000001','global')`, uuid.NewString(), id); err != nil {
@@ -157,7 +157,7 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 
 	// Assign a venue role and grant, then revoke, a missing permission via HTTP.
 	targetID := uuid.NewString()
-	if _, err := db.Exec(`INSERT INTO users(id,workos_id,email,is_active) VALUES($1,'workos-scheduler','scheduler@example.com',true)`, targetID); err != nil {
+	if _, err := db.Exec(`INSERT INTO users(id,workos_id,email,is_active,workos_invitation_id) VALUES($1,'workos-scheduler','scheduler@example.com',true,'inv-scheduler')`, targetID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO venues(id,name) VALUES('venue-test','Test')`); err != nil {
