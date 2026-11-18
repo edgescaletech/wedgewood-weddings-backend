@@ -20,13 +20,18 @@ func (server *Server) effectivePermissions(writer http.ResponseWriter, request *
 		mutationError(writer, errNotFound)
 		return
 	}
-	var venueID *string
+	var resourceID string
 	if venue := request.URL.Query().Get("venueId"); venue != "" {
 		if len(venue) > 64 {
 			mutationError(writer, errInvalid)
 			return
 		}
-		venueID = &venue
+		var err error
+		resourceID, err = venueResource(request.Context(), server.DB, venue)
+		if err != nil {
+			mutationError(writer, err)
+			return
+		}
 	}
 	rows, err := server.DB.QueryContext(request.Context(), `SELECT key FROM permissions ORDER BY key`)
 	if err != nil {
@@ -57,7 +62,11 @@ func (server *Server) effectivePermissions(writer http.ResponseWriter, request *
 	result := make([]entry, 0, len(keys))
 	for _, key := range keys {
 		item := entry{Permission: key}
-		item.Effective, err = server.Access.HasPermission(request.Context(), userID, key, venueID)
+		if resourceID == "" || administrativePermission(key) {
+			item.Effective, err = server.Access.HasGlobalPermission(request.Context(), userID, key)
+		} else {
+			item.Effective, err = server.Access.HasResourcePermission(request.Context(), userID, key, resourceID)
+		}
 		item.Inherited = item.Effective
 		if err != nil {
 			mutationError(writer, err)

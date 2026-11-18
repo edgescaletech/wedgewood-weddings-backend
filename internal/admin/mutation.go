@@ -15,15 +15,16 @@ import (
 )
 
 var (
-	errForbidden = errors.New("permission denied")
-	errInvalid   = errors.New("invalid request")
-	errNotFound  = errors.New("not found")
-	errConflict  = errors.New("change would remove the last effective administrator")
+	errForbidden         = errors.New("permission denied")
+	errInvalid           = errors.New("invalid request")
+	errNotFound          = errors.New("not found")
+	errProvisionConflict = errors.New("provisioning already started with different account details")
+	errConflict          = errors.New("change would remove the last effective administrator")
 )
 
 // mutate serializes privileged changes, rechecks access, and commits audit with the change.
 func (server *Server) mutate(writer http.ResponseWriter, request *http.Request, permission string, change func(context.Context, *sql.Tx, string) error) {
-	if request.Header.Get("Origin") == "" || request.Header.Get("Origin") != strings.TrimRight(server.AppURL, "/") {
+	if !server.validOrigin(request) {
 		respond(writer, http.StatusForbidden, map[string]string{"error": "invalid origin"})
 		return
 	}
@@ -41,7 +42,7 @@ func (server *Server) mutate(writer http.ResponseWriter, request *http.Request, 
 	defer tx.Rollback()
 	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(87239651)`); err == nil {
 		var allowed bool
-		allowed, err = authorization.HasPermissionTx(ctx, tx, actor.ID, permission, nil)
+		allowed, err = authorization.HasGlobalPermissionTx(ctx, tx, actor.ID, permission)
 		if err == nil && !allowed {
 			err = errForbidden
 		}
@@ -65,7 +66,7 @@ func (server *Server) mutate(writer http.ResponseWriter, request *http.Request, 
 
 // ensureAdministrator requires an active global user with every management permission.
 func ensureAdministrator(ctx context.Context, tx *sql.Tx) error {
-	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT u.id FROM users u JOIN user_roles ur ON ur.user_id=u.id JOIN roles r ON r.id=ur.role_id WHERE u.is_active AND r.scope='global' AND ur.venue_id IS NULL`)
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT u.id FROM users u JOIN user_roles ur ON ur.user_id=u.id JOIN roles r ON r.id=ur.role_id WHERE u.is_active AND r.assignment_type='global' AND ur.resource_id IS NULL`)
 	if err != nil {
 		return err
 	}
@@ -87,7 +88,7 @@ func ensureAdministrator(ctx context.Context, tx *sql.Tx) error {
 	for _, id := range candidates {
 		complete := true
 		for _, key := range permissions {
-			allowed, err := authorization.HasPermissionTx(ctx, tx, id, key, nil)
+			allowed, err := authorization.HasGlobalPermissionTx(ctx, tx, id, key)
 			if err != nil {
 				return err
 			}
@@ -104,12 +105,19 @@ func ensureAdministrator(ctx context.Context, tx *sql.Tx) error {
 }
 
 // audit writes an audit record in the same transaction as the privileged change.
-func audit(ctx context.Context, tx *sql.Tx, actor, action, targetType, targetID string, venue *string, metadata any) error {
+func audit(ctx context.Context, tx *sql.Tx, actor, action, targetType, targetID string, resource *resourceScope, metadata any) error {
 	data, err := json.Marshal(metadata)
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO audit_logs(id,actor_user_id,action,target_type,target_id,venue_id,metadata) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)`, uuid.NewString(), actor, action, targetType, targetID, venue, string(data))
+	var resourceID, resourceType, externalID *string
+	if resource != nil {
+		resourceID, resourceType, externalID = &resource.id, &resource.resourceType, &resource.externalID
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO audit_logs
+		(id,actor_user_id,action,target_type,target_id,resource_id,resource_type,resource_external_id,metadata)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)`,
+		uuid.NewString(), actor, action, targetType, targetID, resourceID, resourceType, externalID, string(data))
 	return err
 }
 
@@ -122,8 +130,8 @@ func mutationError(writer http.ResponseWriter, err error) {
 		status, message = http.StatusBadRequest, errInvalid.Error()
 	case errors.Is(err, errNotFound), errors.Is(err, sql.ErrNoRows):
 		status, message = http.StatusNotFound, "not found"
-	case errors.Is(err, errConflict):
-		status, message = http.StatusConflict, errConflict.Error()
+	case errors.Is(err, errConflict), errors.Is(err, errProvisionConflict):
+		status, message = http.StatusConflict, err.Error()
 	}
 	respond(writer, status, map[string]string{"error": message})
 }
@@ -160,3 +168,8 @@ func sameUser(actor, target string) bool {
 }
 
 func validID(id string) bool { _, err := canonicalID(id); return err == nil }
+
+func (server *Server) validOrigin(request *http.Request) bool {
+	origin := request.Header.Get("Origin")
+	return origin != "" && origin == strings.TrimRight(server.AppURL, "/")
+}

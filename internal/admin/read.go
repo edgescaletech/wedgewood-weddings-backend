@@ -22,10 +22,10 @@ type Server struct {
 	Identity IdentityProvider
 }
 
-// Register mounts read-only admin endpoints behind authentication and RBAC.
+// Register mounts admin endpoints behind authentication and RBAC.
 func (server *Server) Register(mux *http.ServeMux) {
 	register := func(pattern, permission string, handler http.HandlerFunc) {
-		mux.Handle(pattern, server.Auth.Middleware(server.Access.HasPermissionMiddleware(permission, nil, handler)))
+		mux.Handle(pattern, server.Auth.Middleware(server.Access.HasPermissionMiddleware(permission, authenticatedUserID, nil, handler)))
 	}
 	register("GET /api/admin/users", "users.view", server.users)
 	register("GET /api/admin/users/{id}", "users.view", server.user)
@@ -36,6 +36,9 @@ func (server *Server) Register(mux *http.ServeMux) {
 	register("GET /api/admin/venues", "venues.manage_access", server.venues)
 	register("GET /api/admin/venues/{id}", "venues.manage_access", server.venue)
 	server.registerMutations(mux)
+	// V1 role definitions are read-only. Unsupported role methods return 404.
+	mux.HandleFunc("/api/admin/roles", http.NotFound)
+	mux.HandleFunc("/api/admin/roles/", http.NotFound)
 }
 
 // pagination limits response size and rejects malformed paging parameters.
@@ -106,11 +109,11 @@ func (server *Server) user(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	server.queryJSON(writer, request, `SELECT jsonb_build_object('id',u.id,'workosId',u.workos_id,'email',u.email,'displayName',u.display_name,'isActive',u.is_active,'archivedAt',u.archived_at,
- 'roles',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',ur.id,'roleId',r.id,'name',r.name,'scope',r.scope,'venueId',ur.venue_id)) FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=u.id),'[]'::jsonb)) FROM users u WHERE u.id=$1`, id)
+ 'roles',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',ur.id,'roleId',r.id,'name',r.name,'scope',r.assignment_type,'venueId',rr.external_id)) FROM user_roles ur JOIN roles r ON r.id=ur.role_id LEFT JOIN rbac_resources rr ON rr.id=ur.resource_id AND rr.resource_type='venue' WHERE ur.user_id=u.id),'[]'::jsonb)) FROM users u WHERE u.id=$1`, id)
 }
 
 func (server *Server) roles(writer http.ResponseWriter, request *http.Request) {
-	server.queryJSON(writer, request, `SELECT COALESCE(jsonb_agg(jsonb_build_object('id',r.id,'name',r.name,'description',r.description,'scope',r.scope,
+	server.queryJSON(writer, request, `SELECT COALESCE(jsonb_agg(jsonb_build_object('id',r.id,'name',r.name,'description',r.description,'scope',r.assignment_type,
  'permissions',COALESCE((SELECT jsonb_agg(p.key ORDER BY p.key) FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.role_id=r.id),'[]'::jsonb)) ORDER BY r.name),'[]'::jsonb) FROM roles r`)
 }
 
@@ -120,7 +123,7 @@ func (server *Server) role(writer http.ResponseWriter, request *http.Request) {
 		respond(writer, http.StatusBadRequest, map[string]string{"error": "invalid role id"})
 		return
 	}
-	server.queryJSON(writer, request, `SELECT jsonb_build_object('id',r.id,'name',r.name,'description',r.description,'scope',r.scope,
+	server.queryJSON(writer, request, `SELECT jsonb_build_object('id',r.id,'name',r.name,'description',r.description,'scope',r.assignment_type,
  'permissions',COALESCE((SELECT jsonb_agg(p.key ORDER BY p.key) FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.role_id=r.id),'[]'::jsonb)) FROM roles r WHERE r.id=$1`, id)
 }
 

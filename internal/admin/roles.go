@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
-	"strings"
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -15,7 +14,7 @@ import (
 // registerMutations mounts each action with the corresponding global permission.
 func (server *Server) registerMutations(mux *http.ServeMux) {
 	register := func(pattern, permission string, handler http.HandlerFunc) {
-		mux.Handle(pattern, server.Auth.Middleware(server.Access.HasPermissionMiddleware(permission, nil, handler)))
+		mux.Handle(pattern, server.Auth.Middleware(server.Access.HasPermissionMiddleware(permission, authenticatedUserID, nil, handler)))
 	}
 	register("POST /api/admin/users/{id}/activate", "users.manage", server.activate)
 	register("POST /api/admin/users", "users.manage", server.createUser)
@@ -24,7 +23,6 @@ func (server *Server) registerMutations(mux *http.ServeMux) {
 	register("PATCH /api/admin/users/{id}", "users.manage", server.updateUser)
 	register("POST /api/admin/users/{id}/roles", "roles.assign", server.assignRole)
 	register("DELETE /api/admin/users/{id}/roles/{assignmentId}", "roles.assign", server.removeRole)
-	register("PUT /api/admin/roles/{id}/permissions", "roles.manage", server.setRolePermissions)
 	register("GET /api/admin/users/{id}/roles", "users.view", server.userRoles)
 	register("GET /api/admin/users/{id}/permissions", "users.view", server.effectivePermissions)
 	register("GET /api/admin/venues/{id}/users", "venues.manage_access", server.venueUsers)
@@ -47,55 +45,45 @@ func (server *Server) assignRole(writer http.ResponseWriter, request *http.Reque
 			return errForbidden
 		}
 		var scope string
-		if err := tx.QueryRowContext(ctx, `SELECT scope FROM roles WHERE id=$1`, input.RoleID).Scan(&scope); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT assignment_type FROM roles WHERE id=$1`, input.RoleID).Scan(&scope); err != nil {
 			return err
 		}
-		if (scope == "global") != (input.VenueID == nil) {
+		if (input.VenueID == nil && scope != "global") || (input.VenueID != nil && scope != "venue") {
 			return errInvalid
 		}
+		var resource *resourceScope
 		if input.VenueID != nil {
-			allowed, err := authorization.HasPermissionTx(ctx, tx, actor, "venues.manage_access", nil)
+			allowed, err := authorization.HasGlobalPermissionTx(ctx, tx, actor, "venues.manage_access")
 			if err != nil {
 				return err
 			}
 			if !allowed {
 				return errForbidden
 			}
-		}
-		// An administrator may only grant permissions they possess themselves.
-		rows, err := tx.QueryContext(ctx, `SELECT p.key FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.role_id=$1`, input.RoleID)
-		if err != nil {
-			return err
-		}
-		var keys []string
-		for rows.Next() {
-			var key string
-			if err := rows.Scan(&key); err != nil {
-				rows.Close()
+			resource = &resourceScope{resourceType: scope, externalID: *input.VenueID}
+			var active bool
+			if err := tx.QueryRowContext(ctx, `SELECT id, is_active FROM rbac_resources
+				WHERE resource_type=$1 AND external_id=$2 FOR SHARE`, scope, resource.externalID).Scan(&resource.id, &active); err != nil {
 				return err
 			}
-			keys = append(keys, key)
+			if !active {
+				return errInvalid
+			}
 		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
+		if err := checkGrantCeiling(ctx, tx, actor, input.RoleID, resource); err != nil {
 			return err
-		}
-		for _, key := range keys {
-			allowed, err := authorization.HasPermissionTx(ctx, tx, actor, key, input.VenueID)
-			if err != nil {
-				return err
-			}
-			if !allowed {
-				return errForbidden
-			}
 		}
 		assignmentID := uuid.NewString()
-		_, err = tx.ExecContext(ctx, `INSERT INTO user_roles(id,user_id,role_id,venue_id,assigned_by) VALUES($1,$2,$3,$4,$5)`, assignmentID, userID, input.RoleID, input.VenueID, actor)
+		var resourceID *string
+		if resource != nil {
+			resourceID = &resource.id
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO user_roles(id,user_id,role_id,assignment_type,resource_id,assigned_by)
+			VALUES($1,$2,$3,$4,$5,$6)`, assignmentID, userID, input.RoleID, scope, resourceID, actor)
 		if err != nil {
 			return constraintError(err)
 		}
-		return audit(ctx, tx, actor, "role.assign", "user", userID, input.VenueID, map[string]any{"roleId": input.RoleID, "assignmentId": assignmentID, "outcome": "success"})
+		return audit(ctx, tx, actor, "role.assign", "user", userID, resource, map[string]any{"roleId": input.RoleID, "assignmentId": assignmentID, "outcome": "success"})
 	})
 }
 
@@ -109,14 +97,17 @@ func (server *Server) removeRole(writer http.ResponseWriter, request *http.Reque
 			return errForbidden
 		}
 		var roleID string
-		var venue sql.NullString
-		if err := tx.QueryRowContext(ctx, `SELECT role_id,venue_id FROM user_roles WHERE id=$1 AND user_id=$2`, assignmentID, userID).Scan(&roleID, &venue); err != nil {
+		var resourceID, resourceType, externalID sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT ur.role_id, rr.id, rr.resource_type, rr.external_id
+			FROM user_roles ur LEFT JOIN rbac_resources rr ON rr.id=ur.resource_id
+			WHERE ur.id=$1 AND ur.user_id=$2 AND ur.assignment_type IN ('global','venue')`,
+			assignmentID, userID).Scan(&roleID, &resourceID, &resourceType, &externalID); err != nil {
 			return err
 		}
-		var venueID *string
-		if venue.Valid {
-			venueID = &venue.String
-			allowed, err := authorization.HasPermissionTx(ctx, tx, actor, "venues.manage_access", nil)
+		var resource *resourceScope
+		if resourceID.Valid {
+			resource = &resourceScope{id: resourceID.String, resourceType: resourceType.String, externalID: externalID.String}
+			allowed, err := authorization.HasGlobalPermissionTx(ctx, tx, actor, "venues.manage_access")
 			if err != nil {
 				return err
 			}
@@ -125,10 +116,18 @@ func (server *Server) removeRole(writer http.ResponseWriter, request *http.Reque
 			}
 		}
 		// With role-only access, removing a grant can only reduce permissions.
-		if _, err := tx.ExecContext(ctx, `DELETE FROM user_roles WHERE id=$1 AND user_id=$2`, assignmentID, userID); err != nil {
+		result, err := tx.ExecContext(ctx, `DELETE FROM user_roles WHERE id=$1 AND user_id=$2`, assignmentID, userID)
+		if err != nil {
 			return err
 		}
-		return audit(ctx, tx, actor, "role.remove", "user", userID, venueID, map[string]any{"roleId": roleID, "assignmentId": assignmentID, "outcome": "success"})
+		count, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			return errNotFound
+		}
+		return audit(ctx, tx, actor, "role.remove", "user", userID, resource, map[string]any{"roleId": roleID, "assignmentId": assignmentID, "outcome": "success"})
 	})
 }
 
@@ -145,7 +144,7 @@ func (server *Server) setRolePermissions(writer http.ResponseWriter, request *ht
 			return errInvalid
 		}
 		var scope string
-		if err := tx.QueryRowContext(ctx, `SELECT scope FROM roles WHERE id=$1`, roleID).Scan(&scope); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT assignment_type FROM roles WHERE id=$1`, roleID).Scan(&scope); err != nil {
 			return err
 		}
 		var assigned bool
@@ -178,10 +177,10 @@ func (server *Server) setRolePermissions(writer http.ResponseWriter, request *ht
 				return errInvalid
 			}
 			seen[key] = true
-			if assigned && !old[key] && (strings.HasPrefix(key, "users.") || strings.HasPrefix(key, "roles.") || key == "venues.manage_access") {
+			if assigned && !old[key] && administrativePermission(key) {
 				return errForbidden
 			}
-			if scope == "venue" && (strings.HasPrefix(key, "users.") || strings.HasPrefix(key, "roles.") || key == "venues.manage_access") {
+			if scope != "global" && administrativePermission(key) {
 				return errInvalid
 			}
 			var exists bool
@@ -191,7 +190,7 @@ func (server *Server) setRolePermissions(writer http.ResponseWriter, request *ht
 			if !exists {
 				return errInvalid
 			}
-			allowed, err := authorization.HasPermissionTx(ctx, tx, actor, key, nil)
+			allowed, err := authorization.HasGlobalPermissionTx(ctx, tx, actor, key)
 			if err != nil {
 				return err
 			}
@@ -202,7 +201,7 @@ func (server *Server) setRolePermissions(writer http.ResponseWriter, request *ht
 		// An actor may not change their own inherited management capabilities.
 		if assigned {
 			for _, key := range oldPermissions {
-				if !seen[key] && (strings.HasPrefix(key, "users.") || strings.HasPrefix(key, "roles.") || key == "venues.manage_access") {
+				if !seen[key] && administrativePermission(key) {
 					return errForbidden
 				}
 			}
@@ -231,7 +230,7 @@ func (server *Server) userRoles(writer http.ResponseWriter, request *http.Reques
 		mutationError(writer, errInvalid)
 		return
 	}
-	server.queryJSON(writer, request, `SELECT COALESCE(jsonb_agg(to_jsonb(t)),'[]'::jsonb) FROM (SELECT ur.id,ur.role_id,ur.venue_id,r.name,r.scope FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=$1 ORDER BY r.name,ur.venue_id) t`, id)
+	server.queryJSON(writer, request, `SELECT COALESCE(jsonb_agg(to_jsonb(t)),'[]'::jsonb) FROM (SELECT ur.id,ur.role_id,rr.external_id AS venue_id,r.name,r.assignment_type AS scope FROM user_roles ur JOIN roles r ON r.id=ur.role_id LEFT JOIN rbac_resources rr ON rr.id=ur.resource_id AND rr.resource_type='venue' WHERE ur.user_id=$1 ORDER BY r.name,rr.external_id) t`, id)
 }
 
 func (server *Server) venueUsers(writer http.ResponseWriter, request *http.Request) {
@@ -245,5 +244,5 @@ func (server *Server) venueUsers(writer http.ResponseWriter, request *http.Reque
 		mutationError(writer, errInvalid)
 		return
 	}
-	server.queryJSON(writer, request, `SELECT COALESCE(jsonb_agg(to_jsonb(t)),'[]'::jsonb) FROM (SELECT u.id,u.email,r.name,ur.id AS assignment_id FROM user_roles ur JOIN users u ON u.id=ur.user_id JOIN roles r ON r.id=ur.role_id WHERE ur.venue_id=$1 ORDER BY u.email,ur.id LIMIT $2 OFFSET $3) t`, id, limit, offset)
+	server.queryJSON(writer, request, `SELECT COALESCE(jsonb_agg(to_jsonb(t)),'[]'::jsonb) FROM (SELECT u.id,u.email,r.name,ur.id AS assignment_id FROM user_roles ur JOIN users u ON u.id=ur.user_id JOIN roles r ON r.id=ur.role_id JOIN rbac_resources rr ON rr.id=ur.resource_id WHERE rr.resource_type='venue' AND rr.external_id=$1 ORDER BY u.email,ur.id LIMIT $2 OFFSET $3) t`, id, limit, offset)
 }

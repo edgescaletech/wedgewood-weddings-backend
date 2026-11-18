@@ -32,9 +32,13 @@ import (
 
 type testTransport func(*http.Request) (*http.Response, error)
 
-type testIdentityProvider struct{}
+type testIdentityProvider func(context.Context, string, string, string, string) (string, error)
 
-func (testIdentityProvider) Create(_ context.Context, email, name, password string) (string, error) {
+func (provider testIdentityProvider) Create(ctx context.Context, operationID, email, name, password string) (string, error) {
+	return provider(ctx, operationID, email, name, password)
+}
+
+func provisionTestUser(_ context.Context, _ string, email, name, password string) (string, error) {
 	if email == "failure@example.com" {
 		return "", errors.New("upstream exposed " + password)
 	}
@@ -95,7 +99,7 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 		if _, err = db.Exec(`INSERT INTO users(id,workos_id,email,is_active) VALUES($1,$2,$2,true)`, id, "workos-"+string(rune('a'+index))); err != nil {
 			t.Fatal(err)
 		}
-		if _, err = db.Exec(`INSERT INTO user_roles(id,user_id,role_id) VALUES($1,$2,'00000000-0000-4000-8000-000000000001')`, uuid.NewString(), id); err != nil {
+		if _, err = db.Exec(`INSERT INTO user_roles(id,user_id,role_id,assignment_type) VALUES($1,$2,'00000000-0000-4000-8000-000000000001','global')`, uuid.NewString(), id); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -136,7 +140,7 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{DB: db, Auth: authServer, Access: &authorization.Service{DB: db}, AppURL: "http://localhost:3000", Identity: testIdentityProvider{}}
+	server := &Server{DB: db, Auth: authServer, Access: &authorization.Service{DB: db}, AppURL: "http://localhost:3000", Identity: testIdentityProvider(provisionTestUser)}
 	mux := http.NewServeMux()
 	server.Register(mux)
 	request := httptest.NewRequest(http.MethodPatch, "/api/admin/users/"+ids[1], strings.NewReader(`{"displayName":"Updated"}`))
@@ -188,7 +192,46 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 		t.Fatalf("malformed UUID: %d", response.Code)
 	}
 
-	response = call(http.MethodPost, "/api/admin/users", `{"email":"new@example.com","displayName":"New user","password":"test-password-123"}`)
+	for _, route := range []struct{ method, path string }{
+		{http.MethodPost, "/api/admin/roles"},
+		{http.MethodDelete, "/api/admin/roles/00000000-0000-4000-8000-000000000001"},
+		{http.MethodPut, "/api/admin/roles/00000000-0000-4000-8000-000000000001/permissions"},
+	} {
+		if response := call(route.method, route.path, "{}"); response.Code != http.StatusNotFound {
+			t.Fatalf("disabled route %s %s: %d", route.method, route.path, response.Code)
+		}
+	}
+
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const newUser = `{"email":"new@example.com","displayName":"New user","password":"test-password-123"}`
+	var operationIDs []string
+	server.Identity = testIdentityProvider(func(ctx context.Context, operationID, email, name, password string) (string, error) {
+		operationIDs = append(operationIDs, operationID)
+		return provisionTestUser(ctx, operationID, email, name, password)
+	})
+	exec(`ALTER TABLE audit_logs ADD CONSTRAINT test_fail_provision CHECK (action <> 'user.create')`)
+	if response := call(http.MethodPost, "/api/admin/users", newUser); response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("forced local failure: %d", response.Code)
+	}
+	exec(`ALTER TABLE audit_logs DROP CONSTRAINT test_fail_provision`)
+	response = call(http.MethodPost, "/api/admin/users", newUser)
+	if response.Code != http.StatusNoContent || len(operationIDs) != 2 || operationIDs[0] != operationIDs[1] {
+		t.Fatalf("retry did not reuse the WorkOS operation: %d %v", response.Code, operationIDs)
+	}
+	if response := call(http.MethodPost, "/api/admin/users", newUser); response.Code != http.StatusNoContent || len(operationIDs) != 2 {
+		t.Fatalf("completed retry called WorkOS again: %d %v", response.Code, operationIDs)
+	}
+	var usersCreated, auditsCreated int
+	if err := db.QueryRow(`SELECT (SELECT count(*) FROM users WHERE workos_id='workos-new'),
+		(SELECT count(*) FROM audit_logs WHERE action='user.create' AND metadata->>'workosId'='workos-new')`).Scan(&usersCreated, &auditsCreated); err != nil || usersCreated != 1 || auditsCreated != 1 {
+		t.Fatalf("retry produced duplicate or missing records: users=%d audits=%d err=%v", usersCreated, auditsCreated, err)
+	}
+	server.Identity = testIdentityProvider(provisionTestUser)
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("provision user: %d %s", response.Code, response.Body.String())
 	}
@@ -216,8 +259,11 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("assign role: %d %s", response.Code, response.Body.String())
 	}
-	venue := "venue-test"
-	allowed, err := server.Access.HasPermission(context.Background(), targetID, "schedules.approve", &venue)
+	venue, err := venueResource(context.Background(), db, "venue-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed, err := server.Access.HasResourcePermission(context.Background(), targetID, "schedules.approve", venue)
 	if err != nil || allowed {
 		t.Fatalf("unexpected inherited approval: %v %v", allowed, err)
 	}
@@ -234,11 +280,29 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	if err := db.QueryRow(`SELECT id FROM user_roles WHERE user_id=$1`, targetID).Scan(&assignedRoleID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`UPDATE venues SET is_active=false WHERE id='venue-test'`); err != nil {
+		t.Fatal(err)
+	}
+	response = call(http.MethodGet, "/api/admin/venues/venue-test/users", "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), assignedRoleID) {
+		t.Fatalf("suspended assignment list: %d %s", response.Code, response.Body.String())
+	}
+	response = call(http.MethodPost, "/api/admin/users/"+targetID+"/roles", `{"roleId":"00000000-0000-4000-8000-000000000002","venueId":"venue-test"}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("grant at inactive venue: %d %s", response.Code, response.Body.String())
+	}
+	response = call(http.MethodGet, "/api/admin/users/"+targetID+"/permissions?venueId=unknown", "")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unresolved venue: %d %s", response.Code, response.Body.String())
+	}
 	response = call(http.MethodDelete, "/api/admin/users/"+targetID+"/roles/"+assignedRoleID, "")
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("remove role: %d %s", response.Code, response.Body.String())
 	}
-	allowed, err = server.Access.HasPermission(context.Background(), targetID, "schedules.view", &venue)
+	if _, err := db.Exec(`UPDATE venues SET is_active=true WHERE id='venue-test'`); err != nil {
+		t.Fatal(err)
+	}
+	allowed, err = server.Access.HasResourcePermission(context.Background(), targetID, "schedules.view", venue)
 	if err != nil || allowed {
 		t.Fatalf("revoked role still grants viewing: %v %v", allowed, err)
 	}
@@ -262,6 +326,69 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("self-assignment status=%d", response.Code)
 	}
+	// A limited global user manager must not reactivate an Admin's retained role.
+	const adminRole = "00000000-0000-4000-8000-000000000001"
+	managerRole := uuid.NewString()
+	exec(`INSERT INTO roles(id,name,description,assignment_type) VALUES($1,'User manager','Test role','global')`, managerRole)
+	exec(`INSERT INTO role_permissions(role_id,permission_id) SELECT $1,id FROM permissions WHERE key='users.manage'`, managerRole)
+	exec(`DELETE FROM user_roles WHERE user_id=$1 AND role_id=$2`, ids[0], adminRole)
+	exec(`INSERT INTO user_roles(id,user_id,role_id,assignment_type) VALUES($1,$2,$3,'global')`, uuid.NewString(), ids[0], managerRole)
+	exec(`UPDATE users SET is_active=false WHERE id=$1`, ids[1])
+	response = call(http.MethodPost, "/api/admin/users/"+ids[1]+"/activate", "")
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("limited manager reactivated Admin grants: %d", response.Code)
+	}
+	exec(`UPDATE users SET is_active=true WHERE id=$1`, ids[1])
+	exec(`DELETE FROM user_roles WHERE user_id=$1 AND role_id=$2`, ids[0], managerRole)
+	exec(`INSERT INTO user_roles(id,user_id,role_id,assignment_type) VALUES($1,$2,$3,'global')`, uuid.NewString(), ids[0], adminRole)
+
+	started, resume := make(chan struct{}), make(chan struct{})
+	server.Identity = testIdentityProvider(func(ctx context.Context, _, _, _, _ string) (string, error) {
+		close(started)
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-resume:
+			return "workos-slow", nil
+		}
+	})
+	result := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		result <- call(http.MethodPost, "/api/admin/users", `{"email":"slow@example.com","displayName":"Slow","password":"test-password"}`)
+	}()
+	select {
+	case <-started:
+	case response := <-result:
+		t.Fatalf("provider did not start: %d", response.Code)
+	case <-time.After(3 * time.Second):
+		t.Fatal("provider did not start in time")
+	}
+	lockCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	revokeErr := func() error {
+		tx, err := db.BeginTx(lockCtx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if _, err := tx.ExecContext(lockCtx, `SELECT pg_advisory_xact_lock(87239651)`); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(lockCtx, `DELETE FROM user_roles WHERE user_id=$1 AND role_id=$2`, ids[0], adminRole); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}()
+	close(resume)
+	response = <-result
+	if revokeErr != nil || response.Code != http.StatusForbidden {
+		t.Fatalf("slow WorkOS call blocked revocation or bypassed final check: %v %d", revokeErr, response.Code)
+	}
+	var finalized bool
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE workos_id='workos-slow')`).Scan(&finalized); err != nil || finalized {
+		t.Fatalf("revoked administrator finalized the user: %v %v", finalized, err)
+	}
+	exec(`INSERT INTO user_roles(id,user_id,role_id,assignment_type) VALUES($1,$2,$3,'global')`, uuid.NewString(), ids[0], adminRole)
 	var committed atomic.Int32
 	var workers sync.WaitGroup
 	for _, id := range ids {

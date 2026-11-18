@@ -9,7 +9,8 @@ BEGIN
     IF NEW.id IS DISTINCT FROM OLD.id
        OR NEW.user_id IS DISTINCT FROM OLD.user_id
        OR NEW.role_id IS DISTINCT FROM OLD.role_id
-       OR NEW.venue_id IS DISTINCT FROM OLD.venue_id THEN
+       OR NEW.assignment_type IS DISTINCT FROM OLD.assignment_type
+       OR NEW.resource_id IS DISTINCT FROM OLD.resource_id THEN
         RAISE EXCEPTION 'assignment identity is immutable; use authorized delete and create operations'
             USING ERRCODE = '23514';
     END IF;

@@ -27,6 +27,11 @@ func (server *Server) setUserStatus(writer http.ResponseWriter, request *http.Re
 		if sameUser(actor, userID) {
 			return errForbidden
 		}
+		if active {
+			if err := checkRetainedGrants(ctx, tx, actor, userID); err != nil {
+				return err
+			}
+		}
 		result, err := tx.ExecContext(ctx, `UPDATE users SET is_active=$1,archived_at=CASE WHEN $2 THEN now() ELSE archived_at END,updated_at=now() WHERE id=$3 AND (NOT $1 OR archived_at IS NULL)`, active, archive, userID)
 		if err != nil {
 			return err

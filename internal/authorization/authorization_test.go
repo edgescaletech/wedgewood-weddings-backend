@@ -17,16 +17,16 @@ func TestHasPermissionQueriesDatabase(t *testing.T) {
 	}
 	defer db.Close()
 	service := &Service{DB: db}
-	venue := "salesforce-venue"
-	mock.ExpectQuery("WITH membership").WithArgs("user-id", "schedules.view", venue).
+	resourceID := "00000000-0000-4000-8000-000000000001"
+	mock.ExpectQuery("SELECT EXISTS").WithArgs("user-id", "schedules.view", resourceID).
 		WillReturnRows(sqlmock.NewRows([]string{"allowed"}).AddRow(true))
-	allowed, err := service.HasPermission(context.Background(), "user-id", "schedules.view", &venue)
+	allowed, err := service.HasResourcePermission(context.Background(), "user-id", "schedules.view", resourceID)
 	if err != nil || !allowed {
 		t.Fatalf("allowed=%v err=%v", allowed, err)
 	}
-	mock.ExpectQuery("WITH membership").WithArgs("user-id", "users.manage", nil).
+	mock.ExpectQuery("SELECT EXISTS").WithArgs("user-id", "users.manage", nil).
 		WillReturnError(errors.New("unavailable"))
-	if _, err := service.HasPermission(context.Background(), "user-id", "users.manage", &venue); err == nil {
+	if _, err := service.HasGlobalPermission(context.Background(), "user-id", "users.manage"); err == nil {
 		t.Fatal("database error must not grant permission")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -36,7 +36,7 @@ func TestHasPermissionQueriesDatabase(t *testing.T) {
 
 func TestMiddlewareRejectsMissingIdentity(t *testing.T) {
 	service := &Service{}
-	handler := service.HasPermissionMiddleware("users.view", nil, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	handler := service.HasPermissionMiddleware("users.view", func(context.Context) (string, bool) { return "", false }, nil, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("handler reached without authentication")
 	}))
 	response := httptest.NewRecorder()

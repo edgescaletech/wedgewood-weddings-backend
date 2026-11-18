@@ -37,9 +37,10 @@ paths:
                 displayName: {type: string}
                 password: {type: string, format: password, writeOnly: true, maxLength: 1024}
       responses:
-        '204': {description: User provisioned}
+        '204': {description: User provisioned or already finalized}
+        '409': {description: A provisioning attempt already exists with different details}
         '403': {description: Forbidden}
-        '503': {description: Provisioning unavailable; reconciliation may be required}
+        '503': {description: Provisioning unavailable. Retry with the same account details.}
   /api/admin/users/{id}:
     get:
       summary: Get user and assigned roles (users.view)
@@ -91,20 +92,6 @@ paths:
         - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
       responses:
         '200': {description: Role and permissions}
-    put:
-      summary: Replace role permissions (roles.manage)
-      security: [{SessionCookie: []}]
-      parameters:
-        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {type: object, required: [permissions], properties: {permissions: {type: array, items: {type: string}}}}
-      responses:
-        '204': {description: Updated}
-        '403': {description: Forbidden}
-        '409': {description: Last administrator protection}
   /api/admin/permissions:
     get:
       summary: List permission definitions (roles.view)
@@ -152,6 +139,7 @@ paths:
         '200': {description: Assignments}
     post:
       summary: Assign a predefined role (roles.assign and venues.manage_access for venue roles)
+      description: Supply an active Salesforce venue ID for venue roles. Omit venueId or use null for global roles.
       security: [{SessionCookie: []}]
       parameters:
         - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
@@ -162,9 +150,11 @@ paths:
             schema: {type: object, required: [roleId], properties: {roleId: {type: string, format: uuid}, venueId: {type: string, nullable: true}}}
       responses:
         '204': {description: Assigned}
+        '400': {description: Invalid assignment or inactive venue}
+        '404': {description: Role or venue not found}
   /api/admin/users/{id}/roles/{assignmentId}:
     delete:
-      summary: Remove a role assignment (roles.assign)
+      summary: Remove a role assignment (roles.assign and venues.manage_access for venue roles)
       security: [{SessionCookie: []}]
       parameters:
         - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
@@ -175,15 +165,18 @@ paths:
   /api/admin/users/{id}/permissions:
     get:
       summary: Show role-derived permissions (users.view)
+      description: Inactive venues deny scoped permissions. Global management permissions are evaluated independently.
       security: [{SessionCookie: []}]
       parameters:
         - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
         - {name: venueId, in: query, schema: {type: string}}
       responses:
         '200': {description: 'Array of permission, inherited, and effective fields. Inherited and effective are equal under role-only RBAC.'}
+        '404': {description: User or venue not found}
   /api/admin/venues/{id}/users:
     get:
-      summary: List venue role assignments (venues.manage_access)
+      summary: List direct venue role assignments (venues.manage_access)
+      description: Includes grants at suspended venues so administrators can inspect and revoke them.
       security: [{SessionCookie: []}]
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}

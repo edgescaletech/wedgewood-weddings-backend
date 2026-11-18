@@ -37,7 +37,6 @@ func TestAdminRoutesRequireAuthentication(t *testing.T) {
 	for _, endpoint := range []struct{ method, path string }{
 		{http.MethodPost, "/api/admin/users"},
 		{http.MethodPost, "/api/admin/users/00000000-0000-4000-8000-000000000001/roles"},
-		{http.MethodPut, "/api/admin/roles/00000000-0000-4000-8000-000000000001/permissions"},
 		{http.MethodDelete, "/api/admin/users/00000000-0000-4000-8000-000000000001"},
 	} {
 		response := httptest.NewRecorder()

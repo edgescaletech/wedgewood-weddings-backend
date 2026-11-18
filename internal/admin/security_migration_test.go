@@ -105,11 +105,18 @@ func TestSecurityMigrationIntegration(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO venues(id,name) VALUES('venue-a','A'),('venue-b','B')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO user_roles(id,user_id,role_id,venue_id) VALUES($1,$2,'00000000-0000-4000-8000-000000000003','venue-a')`, assignmentID, userID); err != nil {
+	var venueA, venueB string
+	for externalID, id := range map[string]*string{"venue-a": &venueA, "venue-b": &venueB} {
+		if err := db.QueryRow(`SELECT id FROM rbac_resources WHERE resource_type='venue' AND external_id=$1`, externalID).Scan(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO user_roles(id,user_id,role_id,assignment_type,resource_id)
+		VALUES($1,$2,'00000000-0000-4000-8000-000000000003','venue',$3)`, assignmentID, userID, venueA); err != nil {
 		t.Fatal(err)
 	}
 	for _, change := range []struct{ column, value string }{
-		{"id", uuid.NewString()}, {"user_id", otherID}, {"role_id", "00000000-0000-4000-8000-000000000002"}, {"venue_id", "venue-b"},
+		{"id", uuid.NewString()}, {"user_id", otherID}, {"role_id", "00000000-0000-4000-8000-000000000002"}, {"resource_id", venueB}, {"assignment_type", "project"},
 	} {
 		t.Run(change.column, func(t *testing.T) {
 			if _, err := db.Exec(`UPDATE user_roles SET `+change.column+`=$1 WHERE id=$2`, change.value, assignmentID); err == nil {
