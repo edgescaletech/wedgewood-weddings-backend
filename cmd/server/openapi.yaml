@@ -320,6 +320,51 @@ paths:
               schema: {$ref: '#/components/schemas/User'}
         '401': {description: Unauthenticated}
         '403': {description: Inactive account}
+  /auth/access:
+    get:
+      summary: Get the current user's global and venue access
+      description: Roles are listed where directly assigned. Each visible venue includes the union of its direct permissions and global permissions. Venues are keyed by Salesforce venue ID. The predefined global Admin role can see every active venue. Other users see active venues with direct assignments.
+      security: [{SessionCookie: []}]
+      responses:
+        '200':
+          description: Current database-backed access
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [global, venues]
+                properties:
+                  global: {$ref: '#/components/schemas/AccessGrants'}
+                  venues:
+                    type: object
+                    additionalProperties: {$ref: '#/components/schemas/AccessGrants'}
+        '401': {description: Authentication required}
+        '403': {description: Inactive account}
+        '503': {description: Authentication or authorization unavailable}
+  /api/me/venues:
+    get:
+      summary: List active venues visible to the current user
+      description: The predefined global Admin role can see every active venue. Other users see active venues with direct assignments. Results are ordered by venue name, then ID. Roles are those assigned directly at each venue.
+      security: [{SessionCookie: []}]
+      responses:
+        '200':
+          description: Visible venues
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, name, roles]
+                  properties:
+                    id: {type: string, description: Salesforce venue ID}
+                    name: {type: string}
+                    roles:
+                      type: array
+                      items: {type: string}
+        '401': {description: Authentication required}
+        '403': {description: Inactive account}
+        '503': {description: Authentication or venue information unavailable}
   /auth/logout:
     post:
       summary: End the current session
@@ -388,6 +433,16 @@ components:
   securitySchemes:
     SessionCookie: {type: apiKey, in: cookie, name: session}
   schemas:
+    AccessGrants:
+      type: object
+      required: [roles, permissions]
+      properties:
+        roles:
+          type: array
+          items: {type: string}
+        permissions:
+          type: array
+          items: {type: string}
     User:
       type: object
       required: [id, workosId, email, isActive]

@@ -36,16 +36,23 @@ func HasResourcePermissionTx(ctx context.Context, db queryRower, userID, permiss
 	return hasPermission(ctx, db, userID, permission, resourceID)
 }
 
+// activeUserGrants selects the current grants for a local user. Both single
+// permission decisions and the bulk access read use the same source.
+const activeUserGrants = `
+    SELECT ur.role_id, ur.resource_id
+    FROM users u
+    JOIN user_roles ur ON ur.user_id = u.id
+    WHERE u.id = $1 AND u.is_active`
+
 func hasPermission(ctx context.Context, db queryRower, userID, permission string, resourceID any) (bool, error) {
 	var allowed bool
 	err := db.QueryRowContext(ctx, `
 SELECT EXISTS (
-    SELECT 1 FROM users u
-    JOIN user_roles ur ON ur.user_id = u.id
-    JOIN role_permissions rp ON rp.role_id = ur.role_id
+    SELECT 1 FROM (`+activeUserGrants+`) grants
+    JOIN role_permissions rp ON rp.role_id = grants.role_id
     JOIN permissions p ON p.id = rp.permission_id
-    WHERE u.id = $1 AND u.is_active AND p.key = $2
-      AND (ur.resource_id IS NULL OR ur.resource_id = $3::uuid)
+    WHERE p.key = $2
+      AND (grants.resource_id IS NULL OR grants.resource_id = $3::uuid)
 ) AND ($3::uuid IS NULL OR EXISTS (
     SELECT 1 FROM rbac_resources WHERE id = $3 AND is_active
 ))`, userID, permission, resourceID).Scan(&allowed)

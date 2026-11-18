@@ -28,6 +28,7 @@ import (
 	workos "github.com/workos/workos-go/v7"
 	"wedding-project/internal/auth"
 	"wedding-project/internal/authorization"
+	"wedding-project/internal/currentuser"
 )
 
 type testTransport func(*http.Request) (*http.Response, error)
@@ -120,20 +121,25 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	})
 	t.Cleanup(func() { http.DefaultTransport = previousTransport })
 	secret := strings.Repeat("z", 32)
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{"sub": "workos-a", "sid": "session-id", "iss": "https://issuer.example", "client_id": "client_test", "iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix()})
-	token.Header["kid"] = "test-key"
-	accessToken, err := token.SignedString(key)
-	if err != nil {
-		t.Fatal(err)
+	createSession := func(workosID, browserSession string) {
+		t.Helper()
+		token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{"sub": workosID, "sid": "session-id", "iss": "https://issuer.example", "client_id": "client_test", "iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix()})
+		token.Header["kid"] = "test-key"
+		accessToken, err := token.SignedString(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sealed, err := workos.SealSessionFromAuthResponse(accessToken, "refresh", &workos.User{ID: workosID, Email: workosID}, nil, secret)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sessionHash := sha256.Sum256([]byte(browserSession))
+		if _, err := db.Exec(`INSERT INTO auth_sessions(id_hash,workos_id,sealed_session,expires_at) VALUES($1,$2,$3,now()+interval '1 hour')`, sessionHash[:], workosID, sealed); err != nil {
+			t.Fatal(err)
+		}
 	}
-	sealed, err := workos.SealSessionFromAuthResponse(accessToken, "refresh", &workos.User{ID: "workos-a", Email: "workos-a"}, nil, secret)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sessionHash := sha256.Sum256([]byte("browser-session"))
-	if _, err = db.Exec(`INSERT INTO auth_sessions(id_hash,workos_id,sealed_session,expires_at) VALUES($1,'workos-a',$2,now()+interval '1 hour')`, sessionHash[:], sealed); err != nil {
-		t.Fatal(err)
-	}
+	createSession("workos-a", "browser-session")
+
 	authServer, err := auth.New(auth.Config{ClientID: "client_test", APIKey: "test-key", Issuer: "https://issuer.example", CookiePassword: secret, RedirectURI: "http://localhost:8080/auth/callback", AppURL: "http://localhost:3000"}, db)
 	if err != nil {
 		t.Fatal(err)
@@ -141,6 +147,7 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	server := &Server{DB: db, Auth: authServer, Access: &authorization.Service{DB: db}, AppURL: "http://localhost:3000"}
 	mux := http.NewServeMux()
 	server.Register(mux)
+	currentuser.Register(mux, authServer, server.Access)
 	request := httptest.NewRequest(http.MethodPatch, "/api/admin/users/"+ids[1], strings.NewReader(`{"displayName":"Updated"}`))
 	request.Header.Set("Origin", "http://localhost:3000")
 	request.Header.Set("Content-Type", "application/json")
@@ -163,6 +170,11 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO venues(id,name) VALUES('venue-test','Test')`); err != nil {
 		t.Fatal(err)
 	}
+	createSession("workos-scheduler", "scheduler-session")
+	t.Run("current-user access", func(t *testing.T) {
+		testCurrentUserAccess(t, db, mux, targetID)
+	})
+
 	callWithKey := func(method, path, body, key string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(method, path, strings.NewReader(body))
 		request.Header.Set("Idempotency-Key", key)

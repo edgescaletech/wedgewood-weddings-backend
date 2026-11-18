@@ -20,6 +20,7 @@ import (
 	"wedding-project/internal/admin"
 	"wedding-project/internal/auth"
 	"wedding-project/internal/authorization"
+	"wedding-project/internal/currentuser"
 	"wedding-project/internal/database"
 	"wedding-project/internal/jobs"
 	"wedding-project/internal/pubsub"
@@ -375,7 +376,8 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	adminServer := &admin.Server{DB: db, Auth: authServer, Access: &authorization.Service{DB: db}, AppURL: os.Getenv("APP_URL"), Identity: admin.WorkOSIdentityProvider{Client: workos.NewClient(os.Getenv("WORKOS_API_KEY"))}}
+	access := &authorization.Service{DB: db}
+	adminServer := &admin.Server{DB: db, Auth: authServer, Access: access, AppURL: os.Getenv("APP_URL"), Identity: admin.WorkOSIdentityProvider{Client: workos.NewClient(os.Getenv("WORKOS_API_KEY"))}}
 	adminServer.Register(mux)
 
 	// Pure API routes
@@ -386,6 +388,7 @@ func main() {
 	mux.Handle("/api/sync/events", authServer.Middleware(syncEventsHandler(syncWorker)))
 
 	registerAuthRoutes(mux, authServer)
+	currentuser.Register(mux, authServer, access)
 	mux.HandleFunc("/docs", docsHandler)
 	mux.HandleFunc("/openapi.yaml", openAPIHandler)
 

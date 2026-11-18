@@ -107,6 +107,17 @@ Existing venue identifiers are Salesforce text IDs, not UUIDs. A resource permis
 4. After invitation acceptance, an authorized Admin must activate the local account. See [Activate a user](#activate-a-user).
 5. The frontend can call `GET /auth/me` with credentials to retrieve the active local identity.
 
+### Current-user authorization
+
+Both endpoints use the active session and read current PostgreSQL assignments and permission mappings. They require no Admin permission and return `Cache-Control: no-store`.
+
+| Endpoint | Response |
+| --- | --- |
+| `GET /auth/access` | `global` contains directly assigned global roles and permissions. `venues` is keyed by Salesforce venue ID. Each venue contains all directly assigned role names and the combined direct and inherited global permission keys. |
+| `GET /api/me/venues` | A list of `{id, name, roles}` ordered by name and ID. Roles are direct venue assignments. A venue visible only through the global Admin role has an empty `roles` array. |
+
+The predefined global Admin role can discover all active venues. Other users see only active venues where they have a direct role assignment. Global roles still contribute effective permissions at visible venues. These endpoints describe current access for the signed-in user and do not change scheduling route enforcement. Use the global scope for global Admin operations.
+
 ### Invitation-only WorkOS setup
 
 In the WorkOS dashboard, turn off **Sign up** in **Authentication** for each environment. Enable WorkOS invitation delivery and hosted email/password authentication. Use the hosted AuthKit invitation link and the configured callback URL to complete registration. The dashboard settings apply per environment. See [WorkOS invite-only signup](https://workos.com/docs/authkit/invite-only-signup) and [WorkOS invitations](https://workos.com/docs/authkit/invitations).
