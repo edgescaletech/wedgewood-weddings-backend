@@ -183,56 +183,10 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("uppercase self archival: %d", response.Code)
 	}
-	response = call(http.MethodPut, "/api/admin/users/"+strings.ToUpper(ids[0])+"/permissions/overrides", `{"permission":"schedules.publish","effect":"allow"}`)
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("uppercase self override: %d", response.Code)
-	}
 	response = call(http.MethodPost, "/api/admin/users/not-a-uuid/deactivate", "")
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("malformed UUID: %d", response.Code)
 	}
-
-	// Removing a venue role must not drop its DENY and reveal global inheritance.
-	if _, err := db.Exec(`INSERT INTO venues(id,name) VALUES('review-venue','Review venue')`); err != nil {
-		t.Fatal(err)
-	}
-	assignmentID := uuid.NewString()
-	if _, err := db.Exec(`INSERT INTO user_roles(id,user_id,role_id,venue_id) VALUES($1,$2,'00000000-0000-4000-8000-000000000003','review-venue')`, assignmentID, ids[1]); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO user_permission_overrides(id,user_id,permission_id,venue_id,effect) SELECT $1,$2,id,'review-venue','deny' FROM permissions WHERE key='schedules.publish'`, uuid.NewString(), ids[1]); err != nil {
-		t.Fatal(err)
-	}
-	venueToReview := "review-venue"
-	allowedBefore, err := server.Access.HasPermission(context.Background(), ids[1], "schedules.publish", &venueToReview)
-	if err != nil || allowedBefore {
-		t.Fatalf("expected venue DENY: %v %v", allowedBefore, err)
-	}
-	response = call(http.MethodDelete, "/api/admin/users/"+ids[1]+"/roles/"+assignmentID, "")
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("role removal restored denied access: %d", response.Code)
-	}
-	allowedAfter, err := server.Access.HasPermission(context.Background(), ids[1], "schedules.publish", &venueToReview)
-	if err != nil || allowedAfter {
-		t.Fatalf("DENY lost after rollback: %v %v", allowedAfter, err)
-	}
-	var auditRemovalCount int
-	if err := db.QueryRow(`SELECT count(*) FROM audit_logs WHERE action='role.remove' AND target_id=$1`, ids[1]).Scan(&auditRemovalCount); err != nil || auditRemovalCount != 0 {
-		t.Fatalf("rejected removal audited: %d %v", auditRemovalCount, err)
-	}
-	// Concurrent attempts still see the DENY and leave the assignment intact.
-	var removalAttempts sync.WaitGroup
-	for range 2 {
-		removalAttempts.Add(1)
-		go func() {
-			defer removalAttempts.Done()
-			attempt := call(http.MethodDelete, "/api/admin/users/"+ids[1]+"/roles/"+assignmentID, "")
-			if attempt.Code != http.StatusForbidden {
-				t.Errorf("concurrent role removal: %d", attempt.Code)
-			}
-		}()
-	}
-	removalAttempts.Wait()
 
 	response = call(http.MethodPost, "/api/admin/users", `{"email":"new@example.com","displayName":"New user","password":"test-password-123"}`)
 	if response.Code != http.StatusNoContent {
@@ -267,25 +221,26 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	if err != nil || allowed {
 		t.Fatalf("unexpected inherited approval: %v %v", allowed, err)
 	}
-	response = call(http.MethodPut, "/api/admin/users/"+targetID+"/permissions/overrides", `{"permission":"schedules.approve","effect":"allow","venueId":"venue-test"}`)
-	if response.Code != http.StatusNoContent {
-		t.Fatalf("override: %d %s", response.Code, response.Body.String())
+	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
+		path := "/api/admin/users/" + targetID + "/permissions/overrides"
+		if method == http.MethodDelete {
+			path += "/" + uuid.NewString()
+		}
+		if result := call(method, path, ""); result.Code != http.StatusNotFound {
+			t.Errorf("retired override route %s returned %d", method, result.Code)
+		}
 	}
-	allowed, err = server.Access.HasPermission(context.Background(), targetID, "schedules.approve", &venue)
-	if err != nil || !allowed {
-		t.Fatalf("override missing: %v %v", allowed, err)
-	}
-	var overrideID string
-	if err := db.QueryRow(`SELECT id FROM user_permission_overrides WHERE user_id=$1`, targetID).Scan(&overrideID); err != nil {
+	var assignedRoleID string
+	if err := db.QueryRow(`SELECT id FROM user_roles WHERE user_id=$1`, targetID).Scan(&assignedRoleID); err != nil {
 		t.Fatal(err)
 	}
-	response = call(http.MethodDelete, "/api/admin/users/"+targetID+"/permissions/overrides/"+overrideID, "")
+	response = call(http.MethodDelete, "/api/admin/users/"+targetID+"/roles/"+assignedRoleID, "")
 	if response.Code != http.StatusNoContent {
-		t.Fatalf("remove override: %d %s", response.Code, response.Body.String())
+		t.Fatalf("remove role: %d %s", response.Code, response.Body.String())
 	}
-	allowed, err = server.Access.HasPermission(context.Background(), targetID, "schedules.approve", &venue)
+	allowed, err = server.Access.HasPermission(context.Background(), targetID, "schedules.view", &venue)
 	if err != nil || allowed {
-		t.Fatalf("override not revoked: %v %v", allowed, err)
+		t.Fatalf("revoked role still grants viewing: %v %v", allowed, err)
 	}
 	if _, err := db.Exec(`UPDATE users SET is_active=false WHERE id=$1`, targetID); err != nil {
 		t.Fatal(err)
@@ -306,20 +261,6 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	mux.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("self-assignment status=%d", response.Code)
-	}
-	if _, err := db.Exec(`INSERT INTO user_permission_overrides(id,user_id,permission_id,effect) SELECT $1,$2,id,'deny' FROM permissions WHERE key='users.manage'`, uuid.NewString(), ids[0]); err != nil {
-		t.Fatal(err)
-	}
-	request = httptest.NewRequest(http.MethodPost, "/api/admin/users/"+ids[1]+"/deactivate", nil)
-	request.Header.Set("Origin", "http://localhost:3000")
-	request.AddCookie(&http.Cookie{Name: "session", Value: "browser-session"})
-	response = httptest.NewRecorder()
-	mux.ServeHTTP(response, request)
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("denied admin operation status=%d", response.Code)
-	}
-	if _, err := db.Exec(`DELETE FROM user_permission_overrides WHERE user_id=$1`, ids[0]); err != nil {
-		t.Fatal(err)
 	}
 	var committed atomic.Int32
 	var workers sync.WaitGroup

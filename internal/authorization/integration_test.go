@@ -92,35 +92,17 @@ func TestPermissionIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("schedules.approve", &venueA, false)
-	_, err = db.Exec(`INSERT INTO user_permission_overrides(id,user_id,permission_id,venue_id,effect) SELECT $1,$2,id,'venue-a','allow' FROM permissions WHERE key='schedules.approve'`, uuid.NewString(), userID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	check("schedules.approve", &venueA, true)
-	check("schedules.approve", &venueB, false)
 	_, err = db.Exec(`INSERT INTO user_roles(id,user_id,role_id) VALUES($1,$2,'00000000-0000-4000-8000-000000000001')`, uuid.NewString(), userID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.Exec(`INSERT INTO user_permission_overrides(id,user_id,permission_id,effect) SELECT $1,$2,id,'deny' FROM permissions WHERE key='schedules.approve'`, uuid.NewString(), userID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	check("schedules.approve", &venueA, false)
+	check("schedules.approve", &venueB, true)
+	check("users.manage", nil, true)
 	_, err = db.Exec(`DELETE FROM user_roles WHERE user_id=$1 AND venue_id IS NULL`, userID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	check("schedules.approve", &venueA, true)
-	_, err = db.Exec(`INSERT INTO user_permission_overrides(id,user_id,permission_id,venue_id,effect) SELECT $1,$2,id,'venue-a','deny' FROM permissions WHERE key='schedules.view'`, uuid.NewString(), userID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	check("schedules.view", &venueA, false)
-	_, err = db.Exec(`DELETE FROM user_permission_overrides WHERE user_id=$1 AND permission_id=(SELECT id FROM permissions WHERE key='schedules.view')`, userID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	check("schedules.approve", &venueA, false)
 	check("schedules.view", &venueA, true)
 	_, err = db.Exec(`UPDATE users SET is_active=false WHERE id=$1`, userID)
 	if err != nil {
@@ -136,8 +118,5 @@ func TestPermissionIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("schedules.approve", &venueA, false)
-	var count int
-	if err = db.QueryRow(`SELECT count(*) FROM user_permission_overrides WHERE user_id=$1`, userID).Scan(&count); err != nil || count != 0 {
-		t.Fatalf("orphan overrides %d: %v", count, err)
-	}
+	check("schedules.view", &venueA, false)
 }

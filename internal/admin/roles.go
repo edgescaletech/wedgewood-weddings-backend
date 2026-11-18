@@ -3,7 +3,6 @@ package admin
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -26,10 +25,7 @@ func (server *Server) registerMutations(mux *http.ServeMux) {
 	register("POST /api/admin/users/{id}/roles", "roles.assign", server.assignRole)
 	register("DELETE /api/admin/users/{id}/roles/{assignmentId}", "roles.assign", server.removeRole)
 	register("PUT /api/admin/roles/{id}/permissions", "roles.manage", server.setRolePermissions)
-	register("PUT /api/admin/users/{id}/permissions/overrides", "users.manage_permissions", server.setOverride)
-	register("DELETE /api/admin/users/{id}/permissions/overrides/{overrideId}", "users.manage_permissions", server.removeOverride)
 	register("GET /api/admin/users/{id}/roles", "users.view", server.userRoles)
-	register("GET /api/admin/users/{id}/permissions/overrides", "users.view", server.userOverrides)
 	register("GET /api/admin/users/{id}/permissions", "users.view", server.effectivePermissions)
 	register("GET /api/admin/venues/{id}/users", "venues.manage_access", server.venueUsers)
 }
@@ -128,31 +124,11 @@ func (server *Server) removeRole(writer http.ResponseWriter, request *http.Reque
 				return errForbidden
 			}
 		}
-		// Snapshot every effective permission before trigger-driven override cleanup.
-		before, err := permissionSnapshot(ctx, tx, userID)
-		if err != nil {
-			return err
-		}
-		// Record overrides that the scope-cleanup trigger may remove.
-		var affectedOverrides []byte
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(jsonb_agg(jsonb_build_object('id',id,'permissionId',permission_id,'effect',effect)),'[]'::jsonb) FROM user_permission_overrides WHERE user_id=$1 AND venue_id IS NOT DISTINCT FROM $2`, userID, venueID).Scan(&affectedOverrides); err != nil {
-			return err
-		}
-		var assignmentCount int
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM user_roles WHERE user_id=$1 AND venue_id IS NOT DISTINCT FROM $2`, userID, venueID).Scan(&assignmentCount); err != nil {
-			return err
-		}
+		// With role-only access, removing a grant can only reduce permissions.
 		if _, err := tx.ExecContext(ctx, `DELETE FROM user_roles WHERE id=$1 AND user_id=$2`, assignmentID, userID); err != nil {
 			return err
 		}
-		if err := rejectNewPermissions(ctx, tx, userID, before); err != nil {
-			return err
-		}
-		removedOverrides := json.RawMessage(`[]`)
-		if assignmentCount == 1 {
-			removedOverrides = json.RawMessage(affectedOverrides)
-		}
-		return audit(ctx, tx, actor, "role.remove", "user", userID, venueID, map[string]any{"roleId": roleID, "assignmentId": assignmentID, "removedOverrides": removedOverrides, "outcome": "success"})
+		return audit(ctx, tx, actor, "role.remove", "user", userID, venueID, map[string]any{"roleId": roleID, "assignmentId": assignmentID, "outcome": "success"})
 	})
 }
 
@@ -256,15 +232,6 @@ func (server *Server) userRoles(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	server.queryJSON(writer, request, `SELECT COALESCE(jsonb_agg(to_jsonb(t)),'[]'::jsonb) FROM (SELECT ur.id,ur.role_id,ur.venue_id,r.name,r.scope FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=$1 ORDER BY r.name,ur.venue_id) t`, id)
-}
-
-func (server *Server) userOverrides(writer http.ResponseWriter, request *http.Request) {
-	id := request.PathValue("id")
-	if !validID(id) {
-		mutationError(writer, errInvalid)
-		return
-	}
-	server.queryJSON(writer, request, `SELECT COALESCE(jsonb_agg(to_jsonb(t)),'[]'::jsonb) FROM (SELECT o.id,p.key,o.venue_id,o.effect,o.assigned_by FROM user_permission_overrides o JOIN permissions p ON p.id=o.permission_id WHERE o.user_id=$1 ORDER BY p.key,o.venue_id) t`, id)
 }
 
 func (server *Server) venueUsers(writer http.ResponseWriter, request *http.Request) {

@@ -11,7 +11,7 @@ import (
 	"wedding-project/internal/auth"
 )
 
-// Service resolves permissions without caching role assignments or overrides.
+// Service resolves permissions without caching role assignments.
 type Service struct{ DB *sql.DB }
 
 // HasPermission enforces active status, scope, and deny-before-allow precedence.
@@ -44,10 +44,6 @@ WITH membership AS (
 ), eligible AS (
  SELECT global_access, venue_access FROM membership
  WHERE global_access OR ($3::text IS NOT NULL AND venue_access)
-), overrides AS (
- SELECT o.effect FROM user_permission_overrides o JOIN permissions p ON p.id=o.permission_id CROSS JOIN eligible e
- WHERE o.user_id=$1 AND p.key=$2 AND
-   ((o.venue_id IS NULL AND e.global_access) OR (o.venue_id=$3 AND e.venue_access))
 ), inherited AS (
  SELECT 1 FROM user_roles ur JOIN roles r ON r.id=ur.role_id
  JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id
@@ -57,8 +53,7 @@ WITH membership AS (
 )
 SELECT EXISTS(SELECT 1 FROM users WHERE id=$1 AND is_active)
  AND EXISTS(SELECT 1 FROM eligible)
- AND NOT EXISTS(SELECT 1 FROM overrides WHERE effect='deny')
- AND (EXISTS(SELECT 1 FROM overrides WHERE effect='allow') OR EXISTS(SELECT 1 FROM inherited))`, userID, permission, venueID).Scan(&allowed)
+ AND EXISTS(SELECT 1 FROM inherited)`, userID, permission, venueID).Scan(&allowed)
 	return allowed, err
 }
 

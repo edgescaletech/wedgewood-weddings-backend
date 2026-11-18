@@ -174,42 +174,13 @@ paths:
         '409': {description: Last administrator protection}
   /api/admin/users/{id}/permissions:
     get:
-      summary: Show inherited, override and effective permissions (users.view)
+      summary: Show role-derived permissions (users.view)
       security: [{SessionCookie: []}]
       parameters:
         - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
         - {name: venueId, in: query, schema: {type: string}}
       responses:
-        '200': {description: Permission breakdown}
-  /api/admin/users/{id}/permissions/overrides:
-    get:
-      summary: List user overrides (users.view)
-      security: [{SessionCookie: []}]
-      parameters:
-        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
-      responses:
-        '200': {description: Overrides}
-    put:
-      summary: Set a user override (users.manage_permissions)
-      security: [{SessionCookie: []}]
-      parameters:
-        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {type: object, required: [permission, effect], properties: {permission: {type: string}, effect: {type: string, enum: [allow, deny]}, venueId: {type: string, nullable: true}}}
-      responses:
-        '204': {description: Override saved}
-  /api/admin/users/{id}/permissions/overrides/{overrideId}:
-    delete:
-      summary: Remove a user override (users.manage_permissions)
-      security: [{SessionCookie: []}]
-      parameters:
-        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
-        - {name: overrideId, in: path, required: true, schema: {type: string, format: uuid}}
-      responses:
-        '204': {description: Override removed}
+        '200': {description: 'Array of permission, inherited, and effective fields. Inherited and effective are equal under role-only RBAC.'}
   /api/admin/venues/{id}/users:
     get:
       summary: List venue role assignments (venues.manage_access)

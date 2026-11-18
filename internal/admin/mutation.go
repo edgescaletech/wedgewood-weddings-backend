@@ -83,7 +83,7 @@ func ensureAdministrator(ctx context.Context, tx *sql.Tx) error {
 	if err != nil {
 		return err
 	}
-	permissions := []string{"users.view", "users.manage", "users.manage_permissions", "roles.view", "roles.manage", "roles.assign", "venues.manage_access"}
+	permissions := []string{"users.view", "users.manage", "roles.view", "roles.manage", "roles.assign", "venues.manage_access"}
 	for _, id := range candidates {
 		complete := true
 		for _, key := range permissions {

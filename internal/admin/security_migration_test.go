@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"context"
 	"database/sql"
 	"errors"
 	"net/url"
@@ -14,7 +13,6 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/google/uuid"
-	"wedding-project/internal/authorization"
 )
 
 // TestSecurityMigrationIntegration verifies real migration rollback failures and
@@ -61,7 +59,7 @@ func TestSecurityMigrationIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runner.Close()
-	if err := runner.Up(); err != nil {
+	if err := runner.Migrate(6); err != nil {
 		t.Fatal(err)
 	}
 	userID, otherID, assignmentID := uuid.NewString(), uuid.NewString(), uuid.NewString()
@@ -69,9 +67,6 @@ func TestSecurityMigrationIntegration(t *testing.T) {
 		if _, err := db.Exec(`INSERT INTO users(id,workos_id,email,is_active) VALUES($1::uuid,$1::text,$1::text,true)`, id); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if _, err := db.Exec(`INSERT INTO admin_bootstrap(singleton,user_id) VALUES(true,$1)`, userID); err != nil {
-		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO audit_logs(id,actor_user_id,action) VALUES($1,$2,'test.history')`, uuid.NewString(), userID); err != nil {
 		t.Fatal(err)
@@ -87,16 +82,16 @@ func TestSecurityMigrationIntegration(t *testing.T) {
 	// metadata to the actual retained schema version and resume forward migration.
 	assertHistory := func() {
 		t.Helper()
-		var bootstrapCount, auditCount int
-		if err := db.QueryRow(`SELECT (SELECT count(*) FROM admin_bootstrap),(SELECT count(*) FROM audit_logs)`).Scan(&bootstrapCount, &auditCount); err != nil || bootstrapCount != 1 || auditCount != 1 {
-			t.Fatalf("history lost: %d %d %v", bootstrapCount, auditCount, err)
+		var auditCount int
+		if err := db.QueryRow(`SELECT count(*) FROM audit_logs`).Scan(&auditCount); err != nil || auditCount != 1 {
+			t.Fatalf("audit history lost: count=%d err=%v", auditCount, err)
 		}
 	}
 	assertHistory()
 	if err := runner.Force(6); err != nil {
 		t.Fatal(err)
 	}
-	if err := runner.Up(); !errors.Is(err, migrate.ErrNoChange) {
+	if err := runner.Migrate(6); !errors.Is(err, migrate.ErrNoChange) {
 		t.Fatalf("forward resume: %v", err)
 	}
 	historicalDown, err := os.ReadFile("../migrations/004_admin.down.sql")
@@ -107,16 +102,10 @@ func TestSecurityMigrationIntegration(t *testing.T) {
 		t.Fatal("historical destructive rollback succeeded")
 	}
 	assertHistory()
-	if _, err := db.Exec(`INSERT INTO admin_bootstrap(singleton,user_id) VALUES(true,$1)`, otherID); err == nil {
-		t.Fatal("bootstrap reopened")
-	}
 	if _, err := db.Exec(`INSERT INTO venues(id,name) VALUES('venue-a','A'),('venue-b','B')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO user_roles(id,user_id,role_id,venue_id) VALUES($1,$2,'00000000-0000-4000-8000-000000000003','venue-a')`, assignmentID, userID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO user_permission_overrides(id,user_id,permission_id,venue_id,effect) SELECT $1,$2,id,'venue-a','allow' FROM permissions WHERE key='schedules.publish'`, uuid.NewString(), userID); err != nil {
 		t.Fatal(err)
 	}
 	for _, change := range []struct{ column, value string }{
@@ -128,19 +117,9 @@ func TestSecurityMigrationIntegration(t *testing.T) {
 			}
 		})
 	}
-	// Delete-and-create removes the old ALLOW instead of reviving it when the
-	// user receives a fresh assignment at the original venue.
-	if _, err := db.Exec(`DELETE FROM user_roles WHERE id=$1`, assignmentID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO user_roles(id,user_id,role_id,venue_id) VALUES($1,$2,'00000000-0000-4000-8000-000000000003','venue-a')`, uuid.NewString(), userID); err != nil {
-		t.Fatal(err)
-	}
-	venue := "venue-a"
-	access := authorization.Service{DB: db}
-	allowed, err := access.HasPermission(context.Background(), userID, "schedules.publish", &venue)
-	if err != nil || allowed {
-		t.Fatalf("stale ALLOW revived: %v %v", allowed, err)
+	var absent bool
+	if err := db.QueryRow(`SELECT to_regclass('user_permission_overrides') IS NULL`).Scan(&absent); err != nil || !absent {
+		t.Fatalf("override table still present: %v %v", absent, err)
 	}
 	assertHistory()
 }
