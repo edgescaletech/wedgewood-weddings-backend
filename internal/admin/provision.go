@@ -49,9 +49,13 @@ type invitationOperation struct {
 	priorID, mode, deliveredID, completedID sql.NullString
 	rejectedStatus                          sql.NullInt64
 	createdAt                               time.Time
+	resourceIDs                             []*string
 }
 
-var errInvitationUnavailable = errors.New("invitation service unavailable")
+var (
+	errInvitationUnavailable  = errors.New("invitation service unavailable")
+	errInvitationVenueChanged = errors.New("invitation venue no longer exists")
+)
 
 func (server *Server) createUser(writer http.ResponseWriter, request *http.Request) {
 	var input invitationRequest
@@ -108,7 +112,11 @@ func (server *Server) invite(writer http.ResponseWriter, request *http.Request, 
 				return nil
 			}
 			if userID == "" {
-				return validateInvitationGrants(ctx, tx, actor, input)
+				if err := operation.validateGrants(ctx, tx, actor, input, true); errors.Is(err, errInvitationVenueChanged) {
+					return operation.rejectChangedVenue(ctx, tx)
+				} else {
+					return err
+				}
 			}
 			var eligible bool
 			err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id=$1
@@ -125,15 +133,19 @@ func (server *Server) invite(writer http.ResponseWriter, request *http.Request, 
 				WHERE id=$1 AND archived_at IS NULL AND workos_id IS NULL AND workos_invitation_id IS NOT NULL FOR UPDATE`,
 				userID).Scan(&operation.email, &operation.priorID)
 		} else {
-			err = validateInvitationGrants(ctx, tx, actor, input)
+			err = operation.validateGrants(ctx, tx, actor, input, false)
 		}
 		if err != nil {
 			return err
 		}
 		// A different operation may already own this email or be resending this user's invitation.
-		result, err := tx.ExecContext(ctx, `INSERT INTO user_invitation_operations(id,email,request,resend_user_id,prior_invitation_id)
-			VALUES($1,$2,$3::jsonb,NULLIF($4,'')::uuid,$5) ON CONFLICT DO NOTHING`,
-			key, operation.email, string(payload), userID, operation.priorID)
+		resourceIDs, err := json.Marshal(operation.resourceIDs)
+		if err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `INSERT INTO user_invitation_operations(id,email,request,resend_user_id,prior_invitation_id,resource_ids)
+            VALUES($1,$2,$3::jsonb,NULLIF($4,'')::uuid,$5,$6::jsonb) ON CONFLICT DO NOTHING`,
+			key, operation.email, string(payload), userID, operation.priorID, string(resourceIDs))
 		if err != nil {
 			return err
 		}
@@ -171,25 +183,28 @@ func (server *Server) invite(writer http.ResponseWriter, request *http.Request, 
 		}
 	}
 
-	server.mutate(writer, request, "users.manage", func(ctx context.Context, tx *sql.Tx, actor string) error {
+	err = server.runMutation(ctx, actor, "users.manage", func(ctx context.Context, tx *sql.Tx, actor string) error {
 		var completed bool
-		if err := tx.QueryRowContext(ctx, `SELECT invitation_id IS NOT NULL FROM user_invitation_operations
-			WHERE id=$1 FOR UPDATE`, key).Scan(&completed); err != nil || completed {
+		if err := tx.QueryRowContext(ctx, `SELECT invitation_id IS NOT NULL,rejected_status FROM user_invitation_operations
+			WHERE id=$1 FOR UPDATE`, key).Scan(&completed, &operation.rejectedStatus); err != nil || completed || operation.rejectedStatus.Valid {
 			return err
 		}
 		targetID, action := userID, "user.invite.resend"
 		if userID == "" {
 			action = "user.invite"
 			targetID = uuid.NewString()
-			if err := validateInvitationGrants(ctx, tx, actor, input); err != nil {
+			if err := operation.validateGrants(ctx, tx, actor, input, true); err != nil {
+				if errors.Is(err, errInvitationVenueChanged) {
+					return operation.rejectChangedVenue(ctx, tx)
+				}
 				return err
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO users(id,email,display_name,workos_invitation_id)
 				VALUES($1,$2,$3,$4)`, targetID, input.Email, input.DisplayName, operation.deliveredID.String); err != nil {
 				return constraintError(err)
 			}
-			for _, grant := range input.Roles {
-				if err := assignGrant(ctx, tx, actor, targetID, grant); err != nil {
+			for index, grant := range input.Roles {
+				if err := assignGrant(ctx, tx, actor, targetID, grant, operation.resourceID(index)); err != nil {
 					return err
 				}
 			}
@@ -213,26 +228,56 @@ func (server *Server) invite(writer http.ResponseWriter, request *http.Request, 
 		}
 		return audit(ctx, tx, actor, action, "user", targetID, nil, map[string]string{"invitationId": operation.deliveredID.String})
 	})
+	if err != nil {
+		mutationError(writer, err)
+		return
+	}
+	if operation.rejectedStatus.Valid {
+		writeInvitationRejection(writer, int(operation.rejectedStatus.Int64))
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (operation *invitationOperation) rejectChangedVenue(ctx context.Context, tx *sql.Tx) error {
+	// Release the reservation but retain the original operation and any WorkOS
+	// delivery ID. This invitation can never be linked to a replacement venue.
+	return tx.QueryRowContext(ctx, `UPDATE user_invitation_operations
+        SET rejected_status=COALESCE(rejected_status,409)
+        WHERE id=$1 AND invitation_id IS NULL RETURNING rejected_status`, operation.key).
+		Scan(&operation.rejectedStatus)
+}
+
+func (operation *invitationOperation) resourceID(index int) *string {
+	if index >= len(operation.resourceIDs) {
+		return nil
+	}
+	return operation.resourceIDs[index]
 }
 
 func (operation *invitationOperation) read(ctx context.Context, tx *sql.Tx, payload []byte) (bool, error) {
 	var matches bool
+	var resourceIDs []byte
 	err := tx.QueryRowContext(ctx, `SELECT email, prior_invitation_id, delivery_mode, delivered_id, invitation_id,
-		rejected_status, created_at, (request=$2::jsonb AND resend_user_id IS NOT DISTINCT FROM NULLIF($3,'')::uuid)
+		rejected_status, created_at, resource_ids, (request=$2::jsonb AND resend_user_id IS NOT DISTINCT FROM NULLIF($3,'')::uuid)
 		FROM user_invitation_operations WHERE id=$1`, operation.key, string(payload), operation.userID).
 		Scan(&operation.email, &operation.priorID, &operation.mode, &operation.deliveredID, &operation.completedID,
-			&operation.rejectedStatus, &operation.createdAt, &matches)
+			&operation.rejectedStatus, &operation.createdAt, &resourceIDs, &matches)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err == nil && !matches {
 		return true, errProvisionConflict
 	}
+	if err == nil && resourceIDs != nil {
+		err = json.Unmarshal(resourceIDs, &operation.resourceIDs)
+	}
 	return err == nil, err
 }
 
-// validateInvitationGrants checks the entire grant set before sending an email.
-func validateInvitationGrants(ctx context.Context, tx *sql.Tx, actor string, input invitationRequest) error {
+// validateGrants pins resources on creation and rechecks the same UUIDs on retries.
+func (operation *invitationOperation) validateGrants(ctx context.Context, tx *sql.Tx, actor string, input invitationRequest, requireBinding bool) error {
 	var exists bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE lower(email)=$1)`, input.Email).Scan(&exists); err != nil {
 		return err
@@ -251,18 +296,28 @@ func validateInvitationGrants(ctx context.Context, tx *sql.Tx, actor string, inp
 		return errForbidden
 	}
 	seen := make(map[string]bool)
-	for _, grant := range input.Roles {
+	if !requireBinding {
+		operation.resourceIDs = make([]*string, len(input.Roles))
+	}
+	for index, grant := range input.Roles {
+		binding := operation.resourceID(index)
+		if requireBinding && grant.VenueID != nil && binding == nil {
+			return errInvitationVenueChanged
+		}
 		roleID, err := canonicalID(grant.RoleID)
 		if err != nil {
 			return err
 		}
-		_, resource, err := validateGrant(ctx, tx, actor, roleID, grant.VenueID)
+		_, resource, err := validateGrant(ctx, tx, actor, roleID, grant.VenueID, binding)
 		if err != nil {
 			return err
 		}
 		key := roleID
 		if resource != nil {
 			key += resource.id
+			if !requireBinding {
+				operation.resourceIDs[index] = &resource.id
+			}
 		}
 		if seen[key] {
 			return errInvalid

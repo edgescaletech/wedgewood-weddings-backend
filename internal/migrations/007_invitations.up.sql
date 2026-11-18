@@ -11,6 +11,8 @@ CREATE TABLE user_invitation_operations (
     id UUID PRIMARY KEY,
     email TEXT NOT NULL,
     request JSONB NOT NULL,
+    -- Resource UUIDs follow request role order. Global roles have a null entry.
+    resource_ids JSONB,
     resend_user_id UUID REFERENCES users(id),
     prior_invitation_id TEXT,
     invitation_id TEXT,
@@ -20,8 +22,10 @@ CREATE TABLE user_invitation_operations (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (invitation_id IS NULL OR rejected_status IS NULL)
 );
+
 CREATE UNIQUE INDEX user_invitation_creation_email ON user_invitation_operations(email)
-    WHERE resend_user_id IS NULL AND rejected_status IS NULL;
+    WHERE resend_user_id IS NULL AND rejected_status IS NULL AND invitation_id IS NULL;
+
 CREATE UNIQUE INDEX user_invitation_resend_in_flight ON user_invitation_operations(resend_user_id)
     WHERE resend_user_id IS NOT NULL AND rejected_status IS NULL AND invitation_id IS NULL;
 

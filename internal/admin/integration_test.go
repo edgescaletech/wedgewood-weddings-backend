@@ -211,6 +211,9 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	t.Run("invitation safeguards", func(t *testing.T) {
+		testInvitationSafeguards(t, db, server, callWithKey)
+	})
 	const newUser = `{"email":"new@example.com","displayName":"New user","roles":[{"roleId":"00000000-0000-4000-8000-000000000003","venueId":"venue-test"}]}`
 	invitationKey := uuid.NewString()
 	deliveries := 0
@@ -224,7 +227,7 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 		}
 		return &workos.UserInvite{ID: "inv-new", Email: email}, nil
 	}}
-	exec(`ALTER TABLE audit_logs ADD CONSTRAINT test_fail_provision CHECK (action <> 'user.invite')`)
+	exec(`ALTER TABLE audit_logs ADD CONSTRAINT test_fail_provision CHECK (action <> 'user.invite') NOT VALID`)
 	if response := callWithKey(http.MethodPost, "/api/admin/users", newUser, invitationKey); response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("forced local failure: %d %s", response.Code, response.Body)
 	}
@@ -452,7 +455,7 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 		t.Fatalf("committed %d changes, want exactly one", committed.Load())
 	}
 	var active int
-	if err := db.QueryRow(`SELECT count(*) FROM users WHERE is_active`).Scan(&active); err != nil || active != 1 {
+	if err := db.QueryRow(`SELECT count(*) FROM users WHERE is_active AND id IN ($1,$2)`, ids[0], ids[1]).Scan(&active); err != nil || active != 1 {
 		t.Fatalf("active=%d err=%v", active, err)
 	}
 }

@@ -36,7 +36,7 @@ func (server *Server) assignRole(writer http.ResponseWriter, request *http.Reque
 	}
 	userID := request.PathValue("id")
 	server.mutate(writer, request, "roles.assign", func(ctx context.Context, tx *sql.Tx, actor string) error {
-		return assignGrant(ctx, tx, actor, userID, input)
+		return assignGrant(ctx, tx, actor, userID, input, nil)
 	})
 }
 
@@ -46,14 +46,14 @@ type roleGrant struct {
 }
 
 // assignGrant applies the same authorization and audit rules to standalone and invitation grants.
-func assignGrant(ctx context.Context, tx *sql.Tx, actor, userID string, grant roleGrant) error {
+func assignGrant(ctx context.Context, tx *sql.Tx, actor, userID string, grant roleGrant, resourceIDBinding *string) error {
 	if !validID(userID) || !validID(grant.RoleID) {
 		return errInvalid
 	}
 	if sameUser(actor, userID) {
 		return errForbidden
 	}
-	scope, resource, err := validateGrant(ctx, tx, actor, grant.RoleID, grant.VenueID)
+	scope, resource, err := validateGrant(ctx, tx, actor, grant.RoleID, grant.VenueID, resourceIDBinding)
 	if err != nil {
 		return err
 	}
@@ -71,7 +71,7 @@ func assignGrant(ctx context.Context, tx *sql.Tx, actor, userID string, grant ro
 }
 
 // validateGrant resolves and locks the resource before checking the actor's ceiling.
-func validateGrant(ctx context.Context, tx *sql.Tx, actor, roleID string, venueID *string) (string, *resourceScope, error) {
+func validateGrant(ctx context.Context, tx *sql.Tx, actor, roleID string, venueID, resourceIDBinding *string) (string, *resourceScope, error) {
 	if venueID != nil && (*venueID == "" || len(*venueID) > 64) {
 		return "", nil, errInvalid
 	}
@@ -93,8 +93,14 @@ func validateGrant(ctx context.Context, tx *sql.Tx, actor, roleID string, venueI
 		}
 		resource = &resourceScope{resourceType: scope, externalID: *venueID}
 		var active bool
-		if err := tx.QueryRowContext(ctx, `SELECT id, is_active FROM rbac_resources
-				WHERE resource_type=$1 AND external_id=$2 FOR SHARE`, scope, resource.externalID).Scan(&resource.id, &active); err != nil {
+		err = tx.QueryRowContext(ctx, `SELECT id, is_active FROM rbac_resources
+                WHERE resource_type=$1 AND external_id=$2
+                  AND ($3::uuid IS NULL OR id=$3) FOR SHARE`,
+			scope, resource.externalID, resourceIDBinding).Scan(&resource.id, &active)
+		if resourceIDBinding != nil && errors.Is(err, sql.ErrNoRows) {
+			return "", nil, errInvitationVenueChanged
+		}
+		if err != nil {
 			return "", nil, err
 		}
 		if !active {

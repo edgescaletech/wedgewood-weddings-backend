@@ -68,7 +68,7 @@ func (server *Server) runMutation(ctx context.Context, actorID, permission strin
 	return tx.Commit()
 }
 
-// ensureAdministrator requires an active global user with every management permission.
+// ensureAdministrator requires an active global user with every management permission used in V1.
 func ensureAdministrator(ctx context.Context, tx *sql.Tx) error {
 	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT u.id FROM users u JOIN user_roles ur ON ur.user_id=u.id JOIN roles r ON r.id=ur.role_id WHERE u.is_active AND r.assignment_type='global' AND ur.resource_id IS NULL`)
 	if err != nil {
@@ -88,7 +88,7 @@ func ensureAdministrator(ctx context.Context, tx *sql.Tx) error {
 	if err != nil {
 		return err
 	}
-	permissions := []string{"users.view", "users.manage", "roles.view", "roles.manage", "roles.assign", "venues.manage_access"}
+	permissions := []string{"users.view", "users.manage", "roles.view", "roles.assign", "venues.manage_access"}
 	for _, id := range candidates {
 		complete := true
 		for _, key := range permissions {

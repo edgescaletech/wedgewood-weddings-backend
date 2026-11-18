@@ -54,7 +54,7 @@ paths:
         '401': {description: Authentication required}
         '403': {description: Origin or grant not authorized}
         '404': {description: Role or venue not found}
-        '409': {description: Conflicting operation or existing local account}
+        '409': {description: Conflicting operation, existing local account, or replaced invitation venue}
         '415': {description: Expected application/json}
         '503': {description: Invitation could not be finalized. Retry with the same key and request.}
   /api/admin/users/{id}/invitation/resend:

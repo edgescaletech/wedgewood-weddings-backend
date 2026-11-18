@@ -18,7 +18,7 @@ func (rejection *invitationRejection) Error() string { return "invitation reject
 func writeInvitationRejection(writer http.ResponseWriter, status int) {
 	message := "WorkOS rejected the invitation details"
 	if status == http.StatusConflict {
-		message = "invitation can no longer be resent"
+		message = "invitation can no longer be completed"
 	}
 	respond(writer, status, map[string]string{"error": message})
 }
