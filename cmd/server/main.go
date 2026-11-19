@@ -303,10 +303,6 @@ func eventByIDHandler(db *sql.DB, sf *salesforce.Client) http.HandlerFunc {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// main
-// ---------------------------------------------------------------------------
-
 func main() {
 	// Load .env from the same directory as the binary (works locally)
 	exe, _ := os.Executable()
@@ -372,28 +368,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-
-	// Pure API routes
-	mux.HandleFunc("/healthz", healthzHandler)
-
-	mux.Handle("/api/events", authServer.Middleware(eventsHandler(db, sf, syncWorker)))
-	mux.Handle("/api/events/", authServer.Middleware(eventByIDHandler(db, sf)))
-	mux.Handle("/api/sync/events", authServer.Middleware(syncEventsHandler(syncWorker)))
-
-	mux.HandleFunc("/auth/login", authServer.Login)
-	mux.HandleFunc("/auth/password", authServer.PasswordLogin)
-
-	// Temporary signup endpoint; remove this route to disable account creation.
-	mux.Handle("/auth/signup", authServer.SignupRateLimit(http.HandlerFunc(authServer.Signup)))
-
-	mux.HandleFunc("/auth/verify-email", authServer.VerifyEmail)
-	mux.HandleFunc("/auth/forgot-password", authServer.ForgotPassword)
-	mux.HandleFunc("/auth/reset-password", authServer.ResetPassword)
-	mux.HandleFunc("/auth/callback", authServer.Callback)
-	mux.HandleFunc("/auth/logout", authServer.Logout)
-	mux.Handle("/auth/me", authServer.Middleware(http.HandlerFunc(authServer.Me)))
-	mux.HandleFunc("/docs", docsHandler)
-	mux.HandleFunc("/openapi.yaml", openAPIHandler)
+	registerRoutes(mux, db, sf, syncWorker, authServer)
 
 	// Global CORS & logging middleware
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
