@@ -164,3 +164,33 @@ func TestSyncEventsHandler_Validation(t *testing.T) {
 		}
 	})
 }
+
+func TestParseFlexibleDate(t *testing.T) {
+	testDates := []struct {
+		input    string
+		wantYear int
+		wantMonth time.Month
+		wantDay  int
+	}{
+		{"Sun Jan 1, 2023", 2023, time.January, 1},
+		{"Mon Jan 30, 2023", 2023, time.January, 30},
+		{"Mon Feb 27, 2023", 2023, time.February, 27},
+		{"Mon Apr 3, 2023", 2023, time.April, 3},
+		{"Thu Jan 1, 2026", 2026, time.January, 1},
+		{"Mon Nov 30, 2026", 2026, time.November, 30},
+		{"2026-11-30", 2026, time.November, 30},
+		{"11/30/2026", 2026, time.November, 30},
+		{"1/1/2026", 2026, time.January, 1},
+	}
+
+	for _, tc := range testDates {
+		parsed, err := parseFlexibleDate(tc.input)
+		if err != nil {
+			t.Errorf("parseFlexibleDate(%q) failed: %v", tc.input, err)
+			continue
+		}
+		if parsed.Year() != tc.wantYear || parsed.Month() != tc.wantMonth || parsed.Day() != tc.wantDay {
+			t.Errorf("parseFlexibleDate(%q) = %v; want %04d-%02d-%02d", tc.input, parsed, tc.wantYear, tc.wantMonth, tc.wantDay)
+		}
+	}
+}

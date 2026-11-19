@@ -20,20 +20,36 @@ func NewEventRepository(db *sql.DB) *EventRepository {
 	return &EventRepository{db: db}
 }
 
-// UpsertVenue inserts or updates a venue record.
-func UpsertVenue(ctx context.Context, db *sql.DB, id, name, propertyName, gm string) error {
+// UpsertVenue inserts or updates a venue record with optional venue_number, region, and timezone.
+func UpsertVenue(ctx context.Context, db *sql.DB, id, name, propertyName, gm string, opts ...string) error {
 	if id == "" {
 		return nil
 	}
+	venueNumber := ""
+	region := ""
+	timezone := ""
+	if len(opts) > 0 {
+		venueNumber = opts[0]
+	}
+	if len(opts) > 1 {
+		region = opts[1]
+	}
+	if len(opts) > 2 {
+		timezone = opts[2]
+	}
+
 	query := `
-INSERT INTO venues (id, name, property_name, general_manager, updated_at)
-VALUES ($1, $2, $3, $4, NOW())
+INSERT INTO venues (id, name, property_name, general_manager, venue_number, region, timezone, updated_at)
+VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), COALESCE(NULLIF($7, ''), 'America/Denver'), NOW())
 ON CONFLICT (id) DO UPDATE SET
 	name = EXCLUDED.name,
 	property_name = COALESCE(NULLIF(EXCLUDED.property_name, ''), venues.property_name),
 	general_manager = COALESCE(NULLIF(EXCLUDED.general_manager, ''), venues.general_manager),
+	venue_number = COALESCE(NULLIF(EXCLUDED.venue_number, ''), venues.venue_number),
+	region = COALESCE(NULLIF(EXCLUDED.region, ''), venues.region),
+	timezone = COALESCE(NULLIF(EXCLUDED.timezone, ''), venues.timezone),
 	updated_at = NOW();`
-	_, err := db.ExecContext(ctx, query, id, name, propertyName, gm)
+	_, err := db.ExecContext(ctx, query, id, name, propertyName, gm, venueNumber, region, timezone)
 	return err
 }
 
@@ -45,7 +61,7 @@ func UpsertEvent(ctx context.Context, db *sql.DB, evt *models.Event) error {
 
 	// Ensure venue exists first to satisfy foreign key constraint
 	if evt.VenueID != "" {
-		_ = UpsertVenue(ctx, db, evt.VenueID, evt.Venue, evt.VenueProperty, evt.VenueGM)
+		_ = UpsertVenue(ctx, db, evt.VenueID, evt.Venue, evt.VenueProperty, evt.VenueGM, evt.VenueNumber, evt.VenueRegion, evt.VenueTimezone)
 	}
 
 	var cateringJSON []byte
@@ -164,12 +180,15 @@ func UpsertEvents(ctx context.Context, db *sql.DB, evts []models.Event) error {
 	defer tx.Rollback()
 
 	venueStmt, err := tx.PrepareContext(ctx, `
-INSERT INTO venues (id, name, property_name, general_manager, updated_at)
-VALUES ($1, $2, $3, $4, NOW())
+INSERT INTO venues (id, name, property_name, general_manager, venue_number, region, timezone, updated_at)
+VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), COALESCE(NULLIF($7, ''), 'America/Denver'), NOW())
 ON CONFLICT (id) DO UPDATE SET
 	name = EXCLUDED.name,
 	property_name = COALESCE(NULLIF(EXCLUDED.property_name, ''), venues.property_name),
 	general_manager = COALESCE(NULLIF(EXCLUDED.general_manager, ''), venues.general_manager),
+	venue_number = COALESCE(NULLIF(EXCLUDED.venue_number, ''), venues.venue_number),
+	region = COALESCE(NULLIF(EXCLUDED.region, ''), venues.region),
+	timezone = COALESCE(NULLIF(EXCLUDED.timezone, ''), venues.timezone),
 	updated_at = NOW();`)
 	if err != nil {
 		return err
@@ -191,7 +210,7 @@ ON CONFLICT (id) DO UPDATE SET
 		if venueName == "" {
 			venueName = "Unknown Venue"
 		}
-		if _, err := venueStmt.ExecContext(ctx, e.VenueID, venueName, e.VenueProperty, e.VenueGM); err != nil {
+		if _, err := venueStmt.ExecContext(ctx, e.VenueID, venueName, e.VenueProperty, e.VenueGM, e.VenueNumber, e.VenueRegion, e.VenueTimezone); err != nil {
 			return fmt.Errorf("upsert venue %s: %w", e.VenueID, err)
 		}
 	}
@@ -321,6 +340,7 @@ func scanEvent(rows *sql.Rows) (models.Event, error) {
 	var beverageCartDetails, signatureDrinks, chargerPlates sql.NullString
 	var packageName, coordinatorName, djName, decorSetupTime, beoNotes, notes sql.NullString
 	var cateringBytes []byte
+	var venueNumber, venueRegion, venueTimezone sql.NullString
 
 	err := rows.Scan(
 		&e.ID, &venueID, &e.Name, &eventDate, &dayOfWeek, &startTime, &endTime,
@@ -332,6 +352,7 @@ func scanEvent(rows *sql.Rows) (models.Event, error) {
 		&barLastCallTime, &barLastCallDateTime, &anticipatedBarActivity, &otherBarNotes,
 		&beverageCartDetails, &signatureDrinks, &chargerPlates, &e.PhotoBooth, &e.PhotoboothStaffed,
 		&packageName, &coordinatorName, &djName, &decorSetupTime, &beoNotes, &notes, &cateringBytes,
+		&venueNumber, &venueRegion, &venueTimezone,
 	)
 	if err != nil {
 		return e, err
@@ -347,6 +368,12 @@ func scanEvent(rows *sql.Rows) (models.Event, error) {
 	e.Venue = venueName.String
 	e.VenueProperty = venueProperty.String
 	e.VenueGM = venueGM.String
+	e.VenueNumber = venueNumber.String
+	e.VenueRegion = venueRegion.String
+	e.VenueTimezone = venueTimezone.String
+	if e.VenueTimezone == "" {
+		e.VenueTimezone = "America/Denver"
+	}
 	e.CeremonyLocation = ceremonyLocation.String
 	e.CeremonyStartTime = ceremonyStartTime.String
 	e.CeremonyStartDateTime = ceremonyStartDateTime.String
@@ -384,15 +411,16 @@ func scanEvent(rows *sql.Rows) (models.Event, error) {
 }
 
 const selectEventColumns = `
-	id, venue_id, name, event_date, day_of_week, start_time, end_time,
-	event_type, guest_count, under_21_count, over_21_count, stage_name, contract_signed,
-	venue_name, venue_property, venue_gm, ceremony_location,
-	ceremony_start_time, ceremony_start_datetime, meal_service_time, meal_service_datetime,
-	cocktail_hour_start_time, cocktail_hour_start_datetime,
-	has_bar, bar_location, bar_start_time, bar_start_datetime, bar_close_time, bar_close_datetime,
-	bar_last_call_time, bar_last_call_datetime, anticipated_bar_activity, other_bar_notes,
-	beverage_cart_details, signature_drinks, charger_plates, photo_booth, photobooth_staffed,
-	package_name, coordinator_name, dj_name, decor_setup_time, beo_notes, notes, catering_details
+	events.id, events.venue_id, events.name, events.event_date, events.day_of_week, events.start_time, events.end_time,
+	events.event_type, events.guest_count, events.under_21_count, events.over_21_count, events.stage_name, events.contract_signed,
+	events.venue_name, events.venue_property, events.venue_gm, events.ceremony_location,
+	events.ceremony_start_time, events.ceremony_start_datetime, events.meal_service_time, events.meal_service_datetime,
+	events.cocktail_hour_start_time, events.cocktail_hour_start_datetime,
+	events.has_bar, events.bar_location, events.bar_start_time, events.bar_start_datetime, events.bar_close_time, events.bar_close_datetime,
+	events.bar_last_call_time, events.bar_last_call_datetime, events.anticipated_bar_activity, events.other_bar_notes,
+	events.beverage_cart_details, events.signature_drinks, events.charger_plates, events.photo_booth, events.photobooth_staffed,
+	events.package_name, events.coordinator_name, events.dj_name, events.decor_setup_time, events.beo_notes, events.notes, events.catering_details,
+	COALESCE(v.venue_number, ''), COALESCE(v.region, ''), COALESCE(v.timezone, 'America/Denver')
 `
 
 // GetEventsByWeek fetches events for the given week from PostgreSQL.
@@ -404,17 +432,19 @@ func GetEventsByWeek(ctx context.Context, db *sql.DB, weekStart, weekEnd time.Ti
 		query = fmt.Sprintf(`
 			SELECT %s
 			FROM events
-			WHERE event_date >= $1 AND event_date <= $2 AND venue_id = $3
-			  AND stage_name NOT IN ('Closed Lost', 'Cancelled')
-			ORDER BY event_date ASC, start_time ASC`, selectEventColumns)
+			LEFT JOIN venues v ON v.id = events.venue_id
+			WHERE events.event_date >= $1 AND events.event_date <= $2 AND events.venue_id = $3
+			  AND events.stage_name NOT IN ('Closed Lost', 'Cancelled')
+			ORDER BY events.event_date ASC, events.start_time ASC`, selectEventColumns)
 		args = []any{weekStart.Format("2006-01-02"), weekEnd.Format("2006-01-02"), venueID}
 	} else {
 		query = fmt.Sprintf(`
 			SELECT %s
 			FROM events
-			WHERE event_date >= $1 AND event_date <= $2
-			  AND stage_name NOT IN ('Closed Lost', 'Cancelled')
-			ORDER BY event_date ASC, start_time ASC`, selectEventColumns)
+			LEFT JOIN venues v ON v.id = events.venue_id
+			WHERE events.event_date >= $1 AND events.event_date <= $2
+			  AND events.stage_name NOT IN ('Closed Lost', 'Cancelled')
+			ORDER BY events.event_date ASC, events.start_time ASC`, selectEventColumns)
 		args = []any{weekStart.Format("2006-01-02"), weekEnd.Format("2006-01-02")}
 	}
 
@@ -441,7 +471,8 @@ func GetEventByID(ctx context.Context, db *sql.DB, id string) (*models.Event, er
 	query := fmt.Sprintf(`
 		SELECT %s
 		FROM events
-		WHERE id = $1
+		LEFT JOIN venues v ON v.id = events.venue_id
+		WHERE events.id = $1
 		LIMIT 1`, selectEventColumns)
 
 	rows, err := db.QueryContext(ctx, query, id)

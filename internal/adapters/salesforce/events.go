@@ -17,9 +17,17 @@ type QuoteDetails = models.QuoteDetails
 type Event = models.Event
 
 
-// nameRelation captures relationship traversal (e.g. Venue__r.Name, Venue_GM__r.Name).
+// nameRelation captures relationship traversal (e.g. Venue_GM__r.Name, Area__c lookup).
 type nameRelation struct {
 	Name string `json:"Name"`
+}
+
+// venueRelation captures relationship traversal for Venue__c (Account).
+type venueRelation struct {
+	Name            string   `json:"Name"`
+	VenueID         *float64 `json:"Venue_ID__c"`
+	ReportingRegion string   `json:"Venue_Reporting_Region__c"`
+	TimeZone        string   `json:"Time_Zone__c"`
 }
 
 // planningDetailsRelation captures Primary_Planning_Details__r fields.
@@ -58,7 +66,7 @@ type wedgewoodRecord struct {
 	GuestOver21Formula        *float64                 `json:"Guest_Over_21_Formula__c"`
 	VenueName                 string                   `json:"Venue_Name__c"`
 	VenueId                   string                   `json:"Venue__c"`
-	VenueR                    *nameRelation            `json:"Venue__r"`                         // Venue__c lookup → Name
+	VenueR                    *venueRelation           `json:"Venue__r"`                         // Venue__c lookup → Name, Venue_ID__c, Region
 	VenueGMR                  *nameRelation            `json:"Venue_GM__r"`                      // Venue_GM__c lookup → Name
 	CeremonyLocationR         *nameRelation            `json:"Wedgewood_Ceremony_Location_c__r"` // Area__c lookup → Name
 	PhotoboothSetupTime       interface{}              `json:"Photobooth_Setup_Time__c"`
@@ -104,6 +112,9 @@ SELECT
   Venue__c,
   Venue_Name__c,
   Venue__r.Name,
+  Venue__r.Venue_ID__c,
+  Venue__r.Venue_Reporting_Region__c,
+  Venue__r.Time_Zone__c,
   Venue_GM__r.Name,
   Wedgewood_Ceremony_Location_c__c,
   Wedgewood_Ceremony_Location_c__r.Name,
@@ -263,8 +274,18 @@ func toWedgewoodEvent(o wedgewoodRecord) Event {
 	}
 
 	venueProperty := ""
-	if o.VenueR != nil && o.VenueR.Name != "" {
-		venueProperty = o.VenueR.Name
+	venueNumber := ""
+	venueRegion := ""
+	venueTimezone := ""
+	if o.VenueR != nil {
+		if o.VenueR.Name != "" {
+			venueProperty = o.VenueR.Name
+		}
+		if o.VenueR.VenueID != nil {
+			venueNumber = fmt.Sprintf("%.0f", *o.VenueR.VenueID)
+		}
+		venueRegion = o.VenueR.ReportingRegion
+		venueTimezone = o.VenueR.TimeZone
 	}
 
 	ceremonyLocation := ""
@@ -327,6 +348,9 @@ func toWedgewoodEvent(o wedgewoodRecord) Event {
 		Over21Count:               o.GuestOver21Formula,
 		Venue:                     o.VenueName,
 		VenueID:                   o.VenueId,
+		VenueNumber:               venueNumber,
+		VenueRegion:               venueRegion,
+		VenueTimezone:             venueTimezone,
 		VenueProperty:             venueProperty,
 		VenueGM:                   venueGM,
 		CeremonyLocation:          ceremonyLocation,
@@ -742,7 +766,7 @@ func GetEventByID(c *Client, id string) (*Event, error) {
   Start_Date_Time_Formula__c, End_Date_Time_Formula__c,
   Event_Type_Detail__c, Guest_Count_Formula__c,
 	Under_21_Formula__c, Guest_Over_21_Formula__c,
-  Venue__c, Venue_Name__c, Venue__r.Name, Venue_GM__r.Name,
+  Venue__c, Venue_Name__c, Venue__r.Name, Venue__r.Venue_ID__c, Venue__r.Venue_Reporting_Region__c, Venue__r.Time_Zone__c, Venue_GM__r.Name,
   Wedgewood_Ceremony_Location_c__c, Wedgewood_Ceremony_Location_c__r.Name,
   Photobooth_Setup_Time__c, Includes_Photo_Booth__c,
   Cocktail_Hour_Start_Date_Time__c,
