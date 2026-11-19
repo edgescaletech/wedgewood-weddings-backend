@@ -369,6 +369,29 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	if err := db.QueryRow(`SELECT id FROM user_roles WHERE user_id=$1`, targetID).Scan(&assignedRoleID); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("deactivated account permits only reactivation", func(t *testing.T) {
+		userPath := "/api/admin/users/" + targetID
+		rolesPath := userPath + "/roles"
+		assignmentPath := rolesPath + "/" + assignedRoleID
+		if result := call(http.MethodPost, userPath+"/deactivate", ""); result.Code != http.StatusNoContent {
+			t.Fatalf("deactivate: %d %s", result.Code, result.Body.String())
+		}
+		for _, request := range []struct{ method, path, body string }{
+			{http.MethodPatch, userPath, `{"displayName":"Changed"}`},
+			{http.MethodDelete, userPath, ""},
+			{http.MethodPost, rolesPath, `{"roleId":"00000000-0000-4000-8000-000000000001"}`},
+			{http.MethodPut, assignmentPath, `{"roleId":"00000000-0000-4000-8000-000000000002"}`},
+			{http.MethodDelete, assignmentPath, ""},
+		} {
+			result := call(request.method, request.path, request.body)
+			if result.Code != http.StatusConflict {
+				t.Errorf("%s %s: %d %s", request.method, request.path, result.Code, result.Body.String())
+			}
+		}
+		if result := call(http.MethodPost, userPath+"/activate", ""); result.Code != http.StatusNoContent {
+			t.Fatalf("reactivate: %d %s", result.Code, result.Body.String())
+		}
+	})
 	if _, err := db.Exec(`UPDATE venues SET is_active=false WHERE id='venue-test'`); err != nil {
 		t.Fatal(err)
 	}

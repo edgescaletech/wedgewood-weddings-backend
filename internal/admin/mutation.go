@@ -21,6 +21,7 @@ var (
 	errNotFound          = errors.New("not found")
 	errProvisionConflict = errors.New("invitation operation conflicts with account details or current state")
 	errVenueRoleConflict = errors.New("user already has a role at this venue")
+	errDeactivatedUser   = errors.New("reactivate this user before making changes")
 	errConflict          = errors.New("change would remove the last effective administrator")
 )
 
@@ -135,7 +136,8 @@ func mutationError(writer http.ResponseWriter, err error) {
 		status, message = http.StatusBadRequest, errInvalid.Error()
 	case errors.Is(err, errNotFound), errors.Is(err, sql.ErrNoRows):
 		status, message = http.StatusNotFound, "not found"
-	case errors.Is(err, errConflict), errors.Is(err, errProvisionConflict), errors.Is(err, errVenueRoleConflict):
+	case errors.Is(err, errConflict), errors.Is(err, errProvisionConflict),
+		errors.Is(err, errVenueRoleConflict), errors.Is(err, errDeactivatedUser):
 		status, message = http.StatusConflict, err.Error()
 	}
 	respond(writer, status, map[string]string{"error": message})

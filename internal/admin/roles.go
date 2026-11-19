@@ -54,6 +54,9 @@ func assignGrant(ctx context.Context, tx *sql.Tx, actor, userID string, grant ro
 	if sameUser(actor, userID) {
 		return errForbidden
 	}
+	if err := requireEditableUser(ctx, tx, userID); err != nil {
+		return err
+	}
 	scope, resource, err := validateGrant(ctx, tx, actor, grant.RoleID, grant.VenueID, resourceIDBinding)
 	if err != nil {
 		return err
@@ -136,6 +139,9 @@ func (server *Server) replaceVenueRole(writer http.ResponseWriter, request *http
 		if sameUser(actor, userID) {
 			return errForbidden
 		}
+		if err := requireEditableUser(ctx, tx, userID); err != nil {
+			return err
+		}
 		var previousRole, venueID, resourceID string
 		err = tx.QueryRowContext(ctx, `SELECT ur.role_id, rr.external_id, rr.id
 			FROM user_roles ur JOIN rbac_resources rr ON rr.id=ur.resource_id
@@ -180,6 +186,9 @@ func (server *Server) removeRole(writer http.ResponseWriter, request *http.Reque
 		}
 		if sameUser(actor, userID) {
 			return errForbidden
+		}
+		if err := requireEditableUser(ctx, tx, userID); err != nil {
+			return err
 		}
 		var roleID string
 		var resourceID, resourceType, externalID sql.NullString

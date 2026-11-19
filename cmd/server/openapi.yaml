@@ -135,6 +135,7 @@ paths:
       responses:
         '204': {description: Updated}
         '400': {description: Missing or invalid display name}
+        '409': {description: Reactivate the user before editing}
     delete:
       summary: Archive a user and remove local sessions (users.manage)
       security: [{SessionCookie: []}]
@@ -142,7 +143,7 @@ paths:
         - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
       responses:
         '204': {description: Archived}
-        '409': {description: Last administrator would be removed}
+        '409': {description: Last administrator would be removed or the account is deactivated}
   /api/admin/audit:
     get:
       summary: List administrative activity (users.manage)
@@ -249,7 +250,7 @@ paths:
         - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
       responses:
         '204': {description: Deactivated}
-        '409': {description: Last administrator protection}
+        '409': {description: Last administrator protection or the account is already deactivated}
   /api/admin/users/{id}/roles:
     get:
       summary: List assigned roles (users.view)
@@ -273,7 +274,7 @@ paths:
         '204': {description: Assigned}
         '400': {description: Invalid assignment or inactive venue}
         '404': {description: Role or venue not found}
-        '409': {description: User already has a role at this venue}
+        '409': {description: User already has a role at this venue or the account is deactivated}
   /api/admin/users/{id}/roles/{assignmentId}:
     put:
       summary: Replace the role at an existing venue assignment
@@ -293,6 +294,7 @@ paths:
         '401': {description: Authentication required}
         '403': {description: Permission denied}
         '404': {description: Venue assignment or role missing}
+        '409': {description: Reactivate the user before changing assignments}
     delete:
       summary: Remove a role assignment (roles.assign and venues.manage_access for venue roles)
       security: [{SessionCookie: []}]
@@ -301,7 +303,7 @@ paths:
         - {name: assignmentId, in: path, required: true, schema: {type: string, format: uuid}}
       responses:
         '204': {description: Removed}
-        '409': {description: Last administrator protection}
+        '409': {description: Last administrator protection or the account is deactivated}
   /api/admin/users/{id}/permissions:
     get:
       summary: Show role-derived permissions (users.view)

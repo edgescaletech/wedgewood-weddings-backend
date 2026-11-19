@@ -31,6 +31,8 @@ func (server *Server) setUserStatus(writer http.ResponseWriter, request *http.Re
 			if err := checkRetainedGrants(ctx, tx, actor, userID); err != nil {
 				return err
 			}
+		} else if err := requireEditableUser(ctx, tx, userID); err != nil {
+			return err
 		}
 		result, err := tx.ExecContext(ctx, `UPDATE users SET is_active=$1,archived_at=CASE WHEN $2 THEN now() ELSE archived_at END,updated_at=now() WHERE id=$3 AND (NOT $1 OR (archived_at IS NULL AND workos_id IS NOT NULL))`, active, archive, userID)
 		if err != nil {
@@ -73,6 +75,9 @@ func (server *Server) updateUser(writer http.ResponseWriter, request *http.Reque
 		if !validID(userID) || name == "" || len(name) > 200 {
 			return errInvalid
 		}
+		if err := requireEditableUser(ctx, tx, userID); err != nil {
+			return err
+		}
 		result, err := tx.ExecContext(ctx, `UPDATE users SET display_name=$1,updated_at=now() WHERE id=$2 AND archived_at IS NULL`, name, userID)
 		if err != nil {
 			return err
@@ -86,4 +91,19 @@ func (server *Server) updateUser(writer http.ResponseWriter, request *http.Reque
 		}
 		return audit(ctx, tx, actor, "user.update", "user", userID, nil, map[string]any{"fields": []string{"displayName"}, "outcome": "success"})
 	})
+}
+
+// requireEditableUser locks the account while a mutation runs. Pending
+// invitations can still receive their initial assignments before acceptance.
+func requireEditableUser(ctx context.Context, tx *sql.Tx, userID string) error {
+	var active, linked bool
+	err := tx.QueryRowContext(ctx, `SELECT is_active, workos_id IS NOT NULL
+		FROM users WHERE id=$1 AND archived_at IS NULL FOR UPDATE`, userID).Scan(&active, &linked)
+	if err != nil {
+		return err
+	}
+	if linked && !active {
+		return errDeactivatedUser
+	}
+	return nil
 }
