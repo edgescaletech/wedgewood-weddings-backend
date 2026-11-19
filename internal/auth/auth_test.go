@@ -165,6 +165,9 @@ func TestCallbackUsesExistingAccount(t *testing.T) {
 	if recorder.Code != http.StatusSeeOther {
 		t.Fatalf("callback status: %d", recorder.Code)
 	}
+	if location := recorder.Header().Get("Location"); location != "https://app.example/login" {
+		t.Fatalf("callback location: %q", location)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}

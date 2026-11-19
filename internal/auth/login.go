@@ -189,5 +189,5 @@ func (server *Server) createSession(writer http.ResponseWriter, request *http.Re
 		writer.WriteHeader(http.StatusNoContent)
 		return
 	}
-	http.Redirect(writer, request, strings.TrimRight(server.config.AppURL, "/")+"/staffing/", http.StatusSeeOther)
+	http.Redirect(writer, request, strings.TrimRight(server.config.AppURL, "/")+"/login", http.StatusSeeOther)
 }
