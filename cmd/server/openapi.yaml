@@ -143,6 +143,45 @@ paths:
       responses:
         '204': {description: Archived}
         '409': {description: Last administrator would be removed}
+  /api/admin/audit:
+    get:
+      summary: List administrative activity (users.manage)
+      description: Returns recent audit records for account and target activity. A deleted or unavailable actor is shown as Unavailable actor; historical target and resource identifiers remain available.
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 50}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0, default: 0}}
+      responses:
+        '200':
+          description: A page of recent audit events and total count.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total]
+                properties:
+                  total: {type: integer, minimum: 0}
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, action, actorName, metadata, createdAt]
+                      properties:
+                        id: {type: string, format: uuid}
+                        action: {type: string}
+                        actorName: {type: string}
+                        actorEmail: {type: string}
+                        targetType: {type: string}
+                        targetId: {type: string}
+                        targetName: {type: string}
+                        resourceType: {type: string}
+                        resourceExternalId: {type: string}
+                        metadata: {type: object, additionalProperties: true}
+                        createdAt: {type: string, format: date-time}
+        '400': {description: Invalid pagination values}
+        '401': {description: Authentication required}
+        '403': {description: users.manage permission required}
+        '503': {description: Audit history is temporarily unavailable}
   /api/admin/roles:
     get:
       summary: List predefined roles and current permissions (roles.view)

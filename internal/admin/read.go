@@ -28,6 +28,7 @@ func (server *Server) Register(mux *http.ServeMux) {
 	}
 	register("GET /api/admin/users", "users.view", server.users)
 	register("GET /api/admin/users/{id}", "users.view", server.user)
+	register("GET /api/admin/audit", "users.manage", server.audit)
 	register("GET /api/admin/roles", "roles.view", server.roles)
 	register("GET /api/admin/roles/{id}", "roles.view", server.role)
 	register("GET /api/admin/roles/{id}/permissions", "roles.view", server.role)

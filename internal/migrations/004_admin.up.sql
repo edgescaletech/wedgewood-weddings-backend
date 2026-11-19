@@ -77,7 +77,9 @@ CREATE TABLE audit_logs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-
+-- Support newest-first audit listing, with the ID breaking timestamp ties.
+CREATE INDEX audit_logs_created_at_id_idx
+    ON audit_logs (created_at DESC, id DESC);
 
 CREATE FUNCTION require_active_assignment_resource() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
