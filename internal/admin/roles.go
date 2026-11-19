@@ -23,6 +23,7 @@ func (server *Server) registerMutations(mux *http.ServeMux) {
 	register("DELETE /api/admin/users/{id}", "users.manage", server.archive)
 	register("PATCH /api/admin/users/{id}", "users.manage", server.updateUser)
 	register("POST /api/admin/users/{id}/roles", "roles.assign", server.assignRole)
+	register("PUT /api/admin/users/{id}/roles/{assignmentId}", "roles.assign", server.replaceVenueRole)
 	register("DELETE /api/admin/users/{id}/roles/{assignmentId}", "roles.assign", server.removeRole)
 	register("GET /api/admin/users/{id}/roles", "users.view", server.userRoles)
 	register("GET /api/admin/users/{id}/permissions", "users.view", server.effectivePermissions)
@@ -57,17 +58,21 @@ func assignGrant(ctx context.Context, tx *sql.Tx, actor, userID string, grant ro
 	if err != nil {
 		return err
 	}
+	return insertGrant(ctx, tx, actor, userID, grant.RoleID, scope, resource)
+}
+
+func insertGrant(ctx context.Context, tx *sql.Tx, actor, userID, roleID, scope string, resource *resourceScope) error {
 	assignmentID := uuid.NewString()
 	var resourceID *string
 	if resource != nil {
 		resourceID = &resource.id
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO user_roles(id,user_id,role_id,assignment_type,resource_id,assigned_by)
-			VALUES($1,$2,$3,$4,$5,$6)`, assignmentID, userID, grant.RoleID, scope, resourceID, actor)
+	_, err := tx.ExecContext(ctx, `INSERT INTO user_roles(id,user_id,role_id,assignment_type,resource_id,assigned_by)
+			VALUES($1,$2,$3,$4,$5,$6)`, assignmentID, userID, roleID, scope, resourceID, actor)
 	if err != nil {
 		return constraintError(err)
 	}
-	return audit(ctx, tx, actor, "role.assign", "user", userID, resource, map[string]any{"roleId": grant.RoleID, "assignmentId": assignmentID, "outcome": "success"})
+	return audit(ctx, tx, actor, "role.assign", "user", userID, resource, map[string]any{"roleId": roleID, "assignmentId": assignmentID, "outcome": "success"})
 }
 
 // validateGrant resolves and locks the resource before checking the actor's ceiling.
@@ -111,6 +116,60 @@ func validateGrant(ctx context.Context, tx *sql.Tx, actor, roleID string, venueI
 		return "", nil, err
 	}
 	return scope, resource, nil
+}
+
+// replaceVenueRole keeps the resource fixed and replaces the assignment under
+// the same Admin transaction and audit rules as a grant and a revocation.
+func (server *Server) replaceVenueRole(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		RoleID string `json:"roleId"`
+	}
+	if !decodeMutation(writer, request, &input) {
+		return
+	}
+	userID, assignmentID := request.PathValue("id"), request.PathValue("assignmentId")
+	server.mutate(writer, request, "roles.assign", func(ctx context.Context, tx *sql.Tx, actor string) error {
+		roleID, err := canonicalID(input.RoleID)
+		if err != nil || !validID(userID) || !validID(assignmentID) {
+			return errInvalid
+		}
+		if sameUser(actor, userID) {
+			return errForbidden
+		}
+		var previousRole, venueID, resourceID string
+		err = tx.QueryRowContext(ctx, `SELECT ur.role_id, rr.external_id, rr.id
+			FROM user_roles ur JOIN rbac_resources rr ON rr.id=ur.resource_id
+			WHERE ur.id=$1 AND ur.user_id=$2 AND ur.assignment_type='venue'`,
+			assignmentID, userID).Scan(&previousRole, &venueID, &resourceID)
+		if err != nil {
+			return err
+		}
+		// Lock the registry row before deleting the assignment so venue
+		// suspension or deletion cannot cross the replacement.
+		scope, resource, err := validateGrant(ctx, tx, actor, roleID, &venueID, &resourceID)
+		if errors.Is(err, errInvitationVenueChanged) {
+			return errNotFound
+		}
+		if err != nil || previousRole == roleID {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `DELETE FROM user_roles WHERE id=$1 AND user_id=$2`, assignmentID, userID)
+		if err != nil {
+			return err
+		}
+		deleted, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if deleted == 0 {
+			return errNotFound
+		}
+		if err := audit(ctx, tx, actor, "role.remove", "user", userID, resource,
+			map[string]any{"roleId": previousRole, "assignmentId": assignmentID, "outcome": "success"}); err != nil {
+			return err
+		}
+		return insertGrant(ctx, tx, actor, userID, roleID, scope, resource)
+	})
 }
 
 func (server *Server) removeRole(writer http.ResponseWriter, request *http.Request) {
@@ -244,7 +303,10 @@ func (server *Server) setRolePermissions(writer http.ResponseWriter, request *ht
 
 func constraintError(err error) error {
 	var pqErr *pq.Error
-	if errors.As(err, &pqErr) && (pqErr.Code == "23503" || pqErr.Code == "23505" || pqErr.Code == "23514" || pqErr.Code == "P0001") {
+	if errors.As(err, &pqErr) && pqErr.Constraint == "user_roles_venue_unique" {
+		return errVenueRoleConflict
+	}
+	if pqErr != nil && (pqErr.Code == "23503" || pqErr.Code == "23505" || pqErr.Code == "23514" || pqErr.Code == "P0001") {
 		return errInvalid
 	}
 	return err

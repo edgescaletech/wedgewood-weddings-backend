@@ -324,7 +324,7 @@ func (operation *invitationOperation) validateGrants(ctx context.Context, tx *sq
 		}
 		key := roleID
 		if resource != nil {
-			key += resource.id
+			key = resource.id
 			if !requireBinding {
 				operation.resourceIDs[index] = &resource.id
 			}

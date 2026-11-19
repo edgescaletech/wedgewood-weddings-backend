@@ -13,17 +13,57 @@ paths:
     get:
       summary: List local users (users.view)
       security: [{SessionCookie: []}]
+      description: Searches names and emails. Without view, returns the existing summary array. With view=directory, returns the filtered total and the requested page with role assignments.
       parameters:
-        - {name: search, in: query, schema: {type: string}}
+        - {name: search, in: query, schema: {type: string, maxLength: 255}}
+        - {name: role, in: query, schema: {type: string}, description: Exact role name. With venueId only the role at that venue or the global Admin role matches.}
+        - {name: status, in: query, schema: {type: string, enum: [active, invited, inactive, archived]}}
+        - {name: active, in: query, schema: {type: boolean}, description: Filter by the stored active flag.}
+        - {name: venueId, in: query, schema: {type: string, maxLength: 64}}
+        - {name: canPublish, in: query, schema: {type: boolean}, description: A true value requires venueId and restricts results to active users who can publish at that active venue.}
+        - {name: view, in: query, schema: {type: string, enum: [directory]}}
         - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100}}
         - {name: offset, in: query, schema: {type: integer, minimum: 0}}
       responses:
-        '200': {description: User list}
+        '200':
+          description: User summaries or a directory page.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - {type: array, items: {type: object}}
+                  - type: object
+                    required: [items, total]
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: {type: string, format: uuid}
+                            email: {type: string}
+                            displayName: {type: string}
+                            workosId: {type: string, nullable: true}
+                            isActive: {type: boolean}
+                            archivedAt: {type: string, format: date-time, nullable: true}
+                            canPublish: {type: boolean}
+                            roles:
+                              type: array
+                              items:
+                                type: object
+                                properties:
+                                  id: {type: string, format: uuid}
+                                  roleId: {type: string, format: uuid}
+                                  name: {type: string}
+                                  scope: {type: string}
+                                  venueId: {type: string, nullable: true}
+                      total: {type: integer, minimum: 0}
+        '400': {description: Invalid filters or pagination}
         '401': {description: Authentication required}
         '403': {description: Permission denied}
     post:
       summary: Invite a user (users.manage)
-      description: Requires matching Origin. Initial roles also require roles.assign and venue grants require venues.manage_access. WorkOS sends an application invitation. The local account stays inactive until WorkOS confirms acceptance and an Admin activates it.
+      description: Requires matching Origin. Initial roles also require roles.assign and venue grants require venues.manage_access. Assign at most one role per venue. WorkOS sends an application invitation. The local account stays inactive until WorkOS confirms acceptance and an Admin activates it.
       security: [{SessionCookie: []}]
       parameters:
         - {name: Idempotency-Key, in: header, required: true, schema: {type: string, format: uuid}}
@@ -135,8 +175,15 @@ paths:
     get:
       summary: List venues (venues.manage_access)
       security: [{SessionCookie: []}]
+      parameters:
+        - {name: search, in: query, schema: {type: string, maxLength: 255}, description: Case-insensitive venue name search.}
+        - {name: active, in: query, schema: {type: boolean}}
+        - {name: view, in: query, schema: {type: string, enum: [directory]}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0}}
       responses:
-        '200': {description: Venue list}
+        '200': {description: 'Venue array by default. With view=directory, returns {items, total} for the filtered venues.'}
+        '400': {description: Invalid filters or pagination}
   /api/admin/venues/{id}:
     get:
       summary: Get a venue by Salesforce ID (venues.manage_access)
@@ -187,7 +234,26 @@ paths:
         '204': {description: Assigned}
         '400': {description: Invalid assignment or inactive venue}
         '404': {description: Role or venue not found}
+        '409': {description: User already has a role at this venue}
   /api/admin/users/{id}/roles/{assignmentId}:
+    put:
+      summary: Replace the role at an existing venue assignment
+      description: Requires roles.assign, venues.manage_access, and authority to grant the replacement role. The old assignment is replaced atomically at the same venue and the change is audited. Read the user again to obtain the new assignment ID.
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: assignmentId, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: false, required: [roleId], properties: {roleId: {type: string, format: uuid}}}
+      responses:
+        '204': {description: Venue role updated}
+        '400': {description: Invalid role or inactive venue}
+        '401': {description: Authentication required}
+        '403': {description: Permission denied}
+        '404': {description: Venue assignment or role missing}
     delete:
       summary: Remove a role assignment (roles.assign and venues.manage_access for venue roles)
       security: [{SessionCookie: []}]

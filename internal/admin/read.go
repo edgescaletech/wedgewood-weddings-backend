@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/google/uuid"
 	"wedding-project/internal/auth"
@@ -88,18 +87,14 @@ func (server *Server) users(writer http.ResponseWriter, request *http.Request) {
 		respond(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	search := strings.TrimSpace(request.URL.Query().Get("search"))
-	if len(search) > 255 {
-		respond(writer, http.StatusBadRequest, map[string]string{"error": "search too long"})
+	filters, err := parseUserFilters(request)
+	if err != nil {
+		respond(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	active := request.URL.Query().Get("active")
-	if active != "" && active != "true" && active != "false" {
-		respond(writer, http.StatusBadRequest, map[string]string{"error": "invalid active filter"})
-		return
-	}
-	server.queryJSON(writer, request, `SELECT COALESCE(jsonb_agg(to_jsonb(t)),'[]'::jsonb) FROM
- (SELECT id,workos_id,email,display_name,is_active,archived_at,created_at,updated_at FROM users WHERE position(lower($1) in lower(email))>0 AND ($4='' OR is_active=($4='true')) ORDER BY email,id LIMIT $2 OFFSET $3) t`, search, limit, offset, active)
+	server.queryJSON(writer, request, userDirectoryQuery, filters.search, limit, offset, filters.active,
+		filters.status, filters.role, filters.venueID, filters.publishOnly, filters.directory)
+
 }
 
 func (server *Server) user(writer http.ResponseWriter, request *http.Request) {
@@ -137,8 +132,13 @@ func (server *Server) venues(writer http.ResponseWriter, request *http.Request) 
 		respond(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	server.queryJSON(writer, request, `SELECT COALESCE(jsonb_agg(to_jsonb(t)),'[]'::jsonb) FROM
- (SELECT id,name,property_name,is_active FROM venues ORDER BY name,id LIMIT $1 OFFSET $2) t`, limit, offset)
+	search, active, directory, err := parseDirectoryFilters(request)
+	if err != nil {
+		respond(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	server.queryJSON(writer, request, venueDirectoryQuery, limit, offset, search, active, directory)
+
 }
 
 func (server *Server) venue(writer http.ResponseWriter, request *http.Request) {

@@ -34,14 +34,13 @@ func testCurrentUserAccess(t *testing.T, db *sql.DB, mux *http.ServeMux, schedul
 			t.Error(err)
 		}
 	})
-	for _, roleID := range []string{managerRole, schedulerRole} {
+	for _, grant := range []struct{ roleID, venue string }{
+		{managerRole, assignedVenue}, {schedulerRole, otherVenue}, {schedulerRole, inactiveVenue},
+	} {
 		exec(`INSERT INTO user_roles(id,user_id,role_id,assignment_type,resource_id)
 			SELECT $1,$2,$3,'venue',id FROM rbac_resources WHERE resource_type='venue' AND external_id=$4`,
-			uuid.NewString(), schedulerID, roleID, assignedVenue)
+			uuid.NewString(), schedulerID, grant.roleID, grant.venue)
 	}
-	exec(`INSERT INTO user_roles(id,user_id,role_id,assignment_type,resource_id)
-		SELECT $1,$2,$3,'venue',id FROM rbac_resources WHERE resource_type='venue' AND external_id=$4`,
-		uuid.NewString(), schedulerID, schedulerRole, inactiveVenue)
 	exec(`UPDATE venues SET is_active=false WHERE id=$1`, inactiveVenue)
 
 	// A limited global role contributes permissions on assigned venues, but
@@ -117,18 +116,18 @@ func testCurrentUserAccess(t *testing.T, db *sql.DB, mux *http.ServeMux, schedul
 	}
 
 	scopedAccess := getAccess("scheduler-session")
-	wantRoles := []string{"General Manager", "Venue Scheduler"}
+	wantRoles := []string{"General Manager"}
 	assigned := scopedAccess.Venues[assignedVenue]
 	if !slices.Equal(scopedAccess.Global.Roles, []string{"Test Global"}) ||
 		!slices.Equal(scopedAccess.Global.Permissions, []string{"labor_goals.manage"}) ||
-		len(scopedAccess.Venues) != 1 || !slices.Equal(assigned.Roles, wantRoles) ||
+		len(scopedAccess.Venues) != 2 || !slices.Equal(scopedAccess.Venues[otherVenue].Roles, []string{"Venue Scheduler"}) || !slices.Equal(assigned.Roles, wantRoles) ||
 		!slices.Contains(assigned.Permissions, "schedules.approve") ||
 		!slices.Contains(assigned.Permissions, "labor_goals.manage") ||
 		slices.Contains(assigned.Permissions, "users.manage") {
 		t.Fatalf("unexpected scheduler grants: %+v", scopedAccess)
 	}
 	venues := getVenues("scheduler-session")
-	if len(venues) != 1 || venues[0].ID != assignedVenue || venues[0].Name != "Assigned" ||
+	if len(venues) != 2 || venues[0].ID != assignedVenue || venues[0].Name != "Assigned" ||
 		!slices.Equal(venues[0].Roles, wantRoles) {
 		t.Fatalf("unexpected scoped venue list: %+v", venues)
 	}
@@ -136,9 +135,9 @@ func testCurrentUserAccess(t *testing.T, db *sql.DB, mux *http.ServeMux, schedul
 	exec(`DELETE FROM user_roles WHERE user_id=$1 AND role_id=$2`, schedulerID, managerRole)
 	exec(`DELETE FROM role_permissions WHERE role_id=$1`, globalRoleID)
 	updated := getAccess("scheduler-session")
-	if !slices.Equal(updated.Venues[assignedVenue].Roles, []string{"Venue Scheduler"}) ||
-		slices.Contains(updated.Venues[assignedVenue].Permissions, "schedules.approve") ||
-		slices.Contains(updated.Venues[assignedVenue].Permissions, "labor_goals.manage") {
+	if _, found := updated.Venues[assignedVenue]; found ||
+		slices.Contains(updated.Venues[otherVenue].Permissions, "schedules.approve") ||
+		slices.Contains(updated.Venues[otherVenue].Permissions, "labor_goals.manage") {
 		t.Fatalf("revoked grants still visible: %+v", updated)
 	}
 	exec(`DELETE FROM user_roles WHERE user_id=$1`, schedulerID)

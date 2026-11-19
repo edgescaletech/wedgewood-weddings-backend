@@ -56,7 +56,8 @@ CREATE TABLE user_roles (
 
 CREATE UNIQUE INDEX user_roles_global_unique ON user_roles(user_id, role_id) WHERE resource_id IS NULL;
 
-CREATE UNIQUE INDEX user_roles_resource_unique ON user_roles(user_id, resource_id, role_id) WHERE resource_id IS NOT NULL;
+CREATE UNIQUE INDEX user_roles_venue_unique ON user_roles(user_id, resource_id)
+    WHERE assignment_type = 'venue';
 
 CREATE INDEX user_roles_resource_idx ON user_roles(resource_id);
 

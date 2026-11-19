@@ -67,7 +67,7 @@ func TestPermissionIntegration(t *testing.T) {
 	apply("001_phase1_tables.up.sql", "002_auth.up.sql")
 	userID := uuid.NewString()
 	exec(`INSERT INTO users(id,workos_id,email,is_active) VALUES($1,'user_test','test@example.com',true)`, userID)
-	exec(`INSERT INTO venues(id,name,is_active) VALUES('venue-a','A',NULL),('venue-b','B',TRUE),('closed','Closed',FALSE)`)
+	exec(`INSERT INTO venues(id,name,is_active) VALUES('venue-a','A',NULL),('venue-b','B',TRUE),('venue-c','C',TRUE),('closed','Closed',FALSE)`)
 	exec(`INSERT INTO events(id,venue_id,name,event_date) VALUES('historic','venue-a','Historic event',current_date)`)
 	apply("004_admin.up.sql", "005_user_admin.up.sql", "006_security_guards.up.sql")
 	registryID := func(externalID string) string {
@@ -78,7 +78,7 @@ func TestPermissionIntegration(t *testing.T) {
 		}
 		return id
 	}
-	venueA, venueB := registryID("venue-a"), registryID("venue-b")
+	venueA, venueB, venueC := registryID("venue-a"), registryID("venue-b"), registryID("venue-c")
 	var preserved bool
 	if err := db.QueryRow(`SELECT EXISTS (
 		SELECT 1 FROM events WHERE id='historic' AND venue_id='venue-a'
@@ -173,10 +173,10 @@ func TestPermissionIntegration(t *testing.T) {
 		t.Fatal("project role accepted a venue assignment policy")
 	}
 	managerID := uuid.NewString()
-	exec(grant, managerID, userID, venueA)
-	check("schedules.approve", &venueA, true)
+	exec(grant, managerID, userID, venueC)
+	check("schedules.approve", &venueC, true)
 	exec(`DELETE FROM user_roles WHERE id=$1`, managerID)
-	check("schedules.approve", &venueA, false)
+	check("schedules.approve", &venueC, false)
 
 	tx, err := db.Begin()
 	if err != nil {

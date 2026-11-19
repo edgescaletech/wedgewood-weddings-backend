@@ -224,6 +224,9 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	t.Run("filtered directories", func(t *testing.T) {
+		testFilteredDirectory(t, db, callWithKey)
+	})
 	t.Run("invitation safeguards", func(t *testing.T) {
 		testInvitationSafeguards(t, db, server, callWithKey)
 	})

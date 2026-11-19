@@ -81,7 +81,28 @@ func testInvitationSafeguards(t *testing.T, db *sql.DB, server *Server, call fun
 	}
 	exec(`UPDATE users SET workos_id='workos-reusable-test', email='changed@example.com' WHERE id=$1`, userID)
 	post("/api/admin/users/"+userID+"/activate", "", uuid.NewString(), http.StatusNoContent)
-	post("/api/admin/users/"+userID+"/roles", `{"roleId":"00000000-0000-4000-8000-000000000002","venueId":"invitation-lifecycle"}`, uuid.NewString(), http.StatusNoContent)
+	post("/api/admin/users/"+userID+"/roles", `{"roleId":"00000000-0000-4000-8000-000000000002","venueId":"invitation-lifecycle"}`, uuid.NewString(), http.StatusConflict)
+
+	var assignmentID string
+	if err := db.QueryRow(`SELECT id FROM user_roles WHERE user_id=$1`, userID).Scan(&assignmentID); err != nil {
+		t.Fatal(err)
+	}
+	response := call(http.MethodPut, "/api/admin/users/"+userID+"/roles/"+assignmentID,
+		`{"roleId":"00000000-0000-4000-8000-000000000002"}`, "")
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("replace venue role: %d %s", response.Code, response.Body)
+	}
+	var roleName string
+	if err := db.QueryRow(`SELECT r.name FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=$1`, userID).Scan(&roleName); err != nil || roleName != "General Manager" {
+		t.Fatalf("unexpected replacement: %q %v", roleName, err)
+	}
+	if _, err := db.Exec(`INSERT INTO user_roles(id,user_id,role_id,assignment_type,resource_id)
+		SELECT gen_random_uuid(),user_id,$2,assignment_type,resource_id FROM user_roles WHERE user_id=$1`, userID, schedulerRole); err == nil {
+		t.Fatal("database accepted a second role at the same venue")
+	}
+	duplicate := fmt.Sprintf(`{"email":"duplicate-venue@example.com","displayName":"Duplicate","roles":[{"roleId":%q,"venueId":%q},{"roleId":"00000000-0000-4000-8000-000000000002","venueId":%q}]}`,
+		schedulerRole, venueID, venueID)
+	post(invitePath, duplicate, uuid.NewString(), http.StatusBadRequest)
 
 	post(invitePath, body, firstKey, http.StatusNoContent) // A replay never sends a new invitation.
 	post(invitePath, body, uuid.NewString(), http.StatusNoContent)
