@@ -276,8 +276,12 @@ func eventByIDHandler(db *sql.DB, sf *salesforce.Client) http.HandlerFunc {
 			return
 		}
 		allowed := eventVenueAccess(r)
-		if len(allowed) == 0 {
+		if allowed == nil {
 			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		}
+		if len(allowed) == 0 {
+			writeError(w, http.StatusNotFound, "event not found")
 			return
 		}
 
@@ -286,7 +290,7 @@ func eventByIDHandler(db *sql.DB, sf *salesforce.Client) http.HandlerFunc {
 			evt, err := repositories.GetEventByID(r.Context(), db, id)
 			if err == nil && evt != nil {
 				if !allowed[evt.VenueID] {
-					writeError(w, http.StatusForbidden, "permission denied")
+					writeError(w, http.StatusNotFound, "event not found")
 					return
 				}
 				log.Printf("[DB HIT] Single event %s served from database (<1ms)", id)
@@ -300,11 +304,11 @@ func eventByIDHandler(db *sql.DB, sf *salesforce.Client) http.HandlerFunc {
 		evt, err := salesforce.GetEventByID(sf, id)
 		if err != nil {
 			log.Printf("ERROR GetEventByID(%s): %v", id, err)
-			writeError(w, http.StatusNotFound, fmt.Sprintf("event not found: %v", err))
+			writeError(w, http.StatusNotFound, "event not found")
 			return
 		}
 		if evt == nil || !allowed[evt.VenueID] {
-			writeError(w, http.StatusForbidden, "permission denied")
+			writeError(w, http.StatusNotFound, "event not found")
 			return
 		}
 

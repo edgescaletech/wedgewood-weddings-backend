@@ -758,7 +758,7 @@ paths:
         '400': {description: Missing event ID}
         '401': {description: Unauthenticated}
         '403': {description: Account inactive or venue access denied}
-        '404': {description: Event not found}
+        '404': {description: Event missing or outside the user's venue access}
 components:
   securitySchemes:
     SessionCookie: {type: apiKey, in: cookie, name: session}

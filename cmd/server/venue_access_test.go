@@ -11,10 +11,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 	"wedding-project/internal/adapters/salesforce"
+	"wedding-project/internal/repositories"
 )
 
 func TestVenueAuthorizationIntegration(t *testing.T) {
@@ -92,8 +94,14 @@ func TestVenueAuthorizationIntegration(t *testing.T) {
 		}
 	}
 	exec(`INSERT INTO events(id,venue_id,name,event_date,stage_name,guest_count,under_21_count,over_21_count,contract_signed,has_bar,photo_booth,photobooth_staffed)
-		VALUES('event-a','a','A event','2026-11-17','Booked',0,0,0,false,false,false,false),
-		      ('event-b','b','B event','2026-11-17','Booked',0,0,0,false,false,false,false)`)
+		VALUES('event-a','a','A event','2026-11-17','Booked',20,0,0,false,false,false,false),
+		      ('event-b','b','B event','2026-11-17','Booked',30,0,0,false,false,false,false),
+		      ('event-unassigned',NULL,'Unassigned event','2026-11-17','Booked',40,0,0,false,false,false,false)`)
+	date := time.Date(2026, time.November, 17, 0, 0, 0, 0, time.UTC)
+	guests, count, err := repositories.GetEventGuestCountAndCount(context.Background(), db, "a", date, date)
+	if err != nil || guests != 20 || count != 1 {
+		t.Fatalf("venue a labor totals: guests=%d events=%d err=%v", guests, count, err)
+	}
 	allowed, err := authorizedVenues(context.Background(), db, userID, "schedules.view")
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +123,7 @@ func TestVenueAuthorizationIntegration(t *testing.T) {
 	request = request.WithContext(context.WithValue(request.Context(), venueAccessKey{}, allowed))
 	response = httptest.NewRecorder()
 	eventByIDHandler(db, nil)(response, request)
-	if response.Code != http.StatusForbidden {
+	if response.Code != http.StatusNotFound || response.Body.String() != "{\"error\":\"event not found\"}\n" {
 		t.Fatalf("unauthorized event: %d %s", response.Code, response.Body)
 	}
 	exec(`UPDATE users SET is_active=false WHERE id=$1`, userID)
