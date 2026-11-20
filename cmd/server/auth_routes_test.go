@@ -10,8 +10,7 @@ import (
 	"wedding-project/internal/auth"
 )
 
-// Event routes must reject anonymous requests before reaching their handlers.
-func TestEventRoutesRequireSession(t *testing.T) {
+func TestServerRoutesPreserveAccessBoundaries(t *testing.T) {
 	database, _, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -32,14 +31,13 @@ func TestEventRoutesRequireSession(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	protected := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		t.Error("anonymous request reached event handler")
-	})
-	mux.Handle("/api/events", authServer.Middleware(protected))
-	mux.Handle("/api/events/", authServer.Middleware(protected))
-	mux.HandleFunc("/healthz", healthzHandler)
+	registerRoutes(mux, database, nil, nil, authServer)
 
-	for _, path := range []string{"/api/events", "/api/events/event_1"} {
+	for _, path := range []string{
+		"/api/events", "/api/events/event_1", "/api/labor-goals/summary",
+		"/api/admin/labor-goals/upload", "/api/admin/accounting-periods/upload",
+		"/api/admin/users", "/auth/access",
+	} {
 		response := httptest.NewRecorder()
 		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 		if response.Code != http.StatusUnauthorized {
@@ -52,14 +50,16 @@ func TestEventRoutesRequireSession(t *testing.T) {
 	if health.Code != http.StatusOK {
 		t.Errorf("health check: got %d, want 200", health.Code)
 	}
-}
 
-func TestPublicSignupUnavailable(t *testing.T) {
-	mux := http.NewServeMux()
-	registerAuthRoutes(mux, &auth.Server{})
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/auth/signup", nil))
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("signup status = %d, want 404", response.Code)
+	}
+
+	invite := httptest.NewRecorder()
+	mux.ServeHTTP(invite, httptest.NewRequest(http.MethodGet, "/auth/invite", nil))
+	if invite.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("invitation GET status = %d, want 405", invite.Code)
 	}
 }

@@ -85,7 +85,12 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, file := range []string{"001_phase1_tables.up.sql", "002_auth.up.sql", "003_event_sync_tracking.up.sql", "006_admin.up.sql", "007_user_admin.up.sql", "008_security_guards.up.sql", "009_invitations.up.sql"} {
+	for _, file := range []string{
+		"001_phase1_tables.up.sql", "002_auth.up.sql", "003_event_sync_tracking.up.sql",
+		"004_accounting_and_labor_goals.up.sql", "005_venue_number_and_region.up.sql",
+		"006_admin.up.sql", "007_user_admin.up.sql", "008_security_guards.up.sql",
+		"009_invitations.up.sql", "010_invitation_onboarding.up.sql",
+	} {
 		migration, err := os.ReadFile(filepath.Join("..", "migrations", file))
 		if err != nil {
 			t.Fatal(err)

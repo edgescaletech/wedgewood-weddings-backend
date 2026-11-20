@@ -58,6 +58,9 @@ type Event struct {
 	BarLastCallDateTime       string        `json:"barLastCallDateTime,omitempty"`
 	Venue                     string        `json:"venue"`                            // Main venue/property name
 	VenueID                   string        `json:"venueId,omitempty"`                // Venue Account ID
+	VenueNumber               string        `json:"venueNumber,omitempty"`           // 3-digit finance venue number (e.g. 214, 328)
+	VenueRegion               string        `json:"venueRegion,omitempty"`           // Venue reporting region (e.g. California, Southern)
+	VenueTimezone             string        `json:"venueTimezone,omitempty"`         // IANA timezone (e.g. America/Los_Angeles)
 	VenueProperty             string        `json:"venueProperty"`                    // Property/estate name
 	VenueGM                   string        `json:"venueGM,omitempty"`                // Venue General Manager
 	CeremonyLocation          string        `json:"ceremonyLocation"`                 // Sub-place: e.g. Lakeside Arbor

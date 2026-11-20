@@ -15,12 +15,8 @@ import (
 	"strings"
 	"time"
 
-	workos "github.com/workos/workos-go/v7"
 	"wedding-project/internal/adapters/salesforce"
-	"wedding-project/internal/admin"
 	"wedding-project/internal/auth"
-	"wedding-project/internal/authorization"
-	"wedding-project/internal/currentuser"
 	"wedding-project/internal/database"
 	"wedding-project/internal/jobs"
 	"wedding-project/internal/pubsub"
@@ -307,10 +303,6 @@ func eventByIDHandler(db *sql.DB, sf *salesforce.Client) http.HandlerFunc {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// main
-// ---------------------------------------------------------------------------
-
 func main() {
 	// Load .env from the same directory as the binary (works locally)
 	exe, _ := os.Executable()
@@ -376,21 +368,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	access := &authorization.Service{DB: db}
-	adminServer := &admin.Server{DB: db, Auth: authServer, Access: access, AppURL: os.Getenv("APP_URL"), Identity: admin.WorkOSIdentityProvider{Client: workos.NewClient(os.Getenv("WORKOS_API_KEY"))}}
-	adminServer.Register(mux)
-
-	// Pure API routes
-	mux.HandleFunc("/healthz", healthzHandler)
-
-	mux.Handle("/api/events", authServer.Middleware(eventsHandler(db, sf, syncWorker)))
-	mux.Handle("/api/events/", authServer.Middleware(eventByIDHandler(db, sf)))
-	mux.Handle("/api/sync/events", authServer.Middleware(syncEventsHandler(syncWorker)))
-
-	registerAuthRoutes(mux, authServer)
-	currentuser.Register(mux, authServer, access)
-	mux.HandleFunc("/docs", docsHandler)
-	mux.HandleFunc("/openapi.yaml", openAPIHandler)
+	registerRoutes(mux, db, sf, syncWorker, authServer)
 
 	// Global CORS & logging middleware
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -417,20 +395,4 @@ func main() {
 	if err := http.ListenAndServe(addr, handler); err != nil {
 		log.Fatalf("server: %v", err)
 	}
-}
-
-func registerAuthRoutes(mux *http.ServeMux, authServer *auth.Server) {
-	mux.HandleFunc("/auth/login", authServer.Login)
-	mux.HandleFunc("/auth/password", authServer.PasswordLogin)
-	mux.HandleFunc("/auth/invite", authServer.InviteDetails)
-	mux.HandleFunc("/auth/invite/send-code", authServer.SendInviteCode)
-	mux.HandleFunc("/auth/invite/password", authServer.SetInvitePassword)
-	mux.HandleFunc("/auth/invite/verify", authServer.VerifyInviteEmail)
-
-	mux.HandleFunc("/auth/verify-email", authServer.VerifyEmail)
-	mux.HandleFunc("/auth/forgot-password", authServer.ForgotPassword)
-	mux.HandleFunc("/auth/reset-password", authServer.ResetPassword)
-	mux.HandleFunc("/auth/callback", authServer.Callback)
-	mux.HandleFunc("/auth/logout", authServer.Logout)
-	mux.Handle("/auth/me", authServer.Middleware(http.HandlerFunc(authServer.Me)))
 }

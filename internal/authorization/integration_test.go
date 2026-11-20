@@ -64,7 +64,8 @@ func TestPermissionIntegration(t *testing.T) {
 			exec(string(migration))
 		}
 	}
-	apply("001_phase1_tables.up.sql", "002_auth.up.sql")
+	apply("001_phase1_tables.up.sql", "002_auth.up.sql", "003_event_sync_tracking.up.sql",
+		"004_accounting_and_labor_goals.up.sql", "005_venue_number_and_region.up.sql")
 	userID := uuid.NewString()
 	exec(`INSERT INTO users(id,workos_id,email,is_active) VALUES($1,'user_test','test@example.com',true)`, userID)
 	exec(`INSERT INTO venues(id,name,is_active) VALUES('venue-a','A',NULL),('venue-b','B',TRUE),('venue-c','C',TRUE),('closed','Closed',FALSE)`)
