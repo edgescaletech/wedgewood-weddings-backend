@@ -41,7 +41,7 @@ func parseUserFilters(request *http.Request) (userFilters, error) {
 	filters.role = strings.TrimSpace(query.Get("role"))
 	publish := query.Get("canPublish")
 	switch filters.status {
-	case "", "active", "invited", "inactive", "archived":
+	case "", "active", "invited", "inactive":
 	default:
 		return filters, errors.New("invalid status filter")
 	}
@@ -62,8 +62,7 @@ WITH selected_venue AS (
     SELECT id, is_active FROM rbac_resources WHERE resource_type = 'venue' AND external_id = $7
 ), candidates AS (
     SELECT u.*,
-           CASE WHEN u.archived_at IS NOT NULL THEN 'archived'
-                WHEN u.is_active THEN 'active'
+           CASE WHEN u.is_active THEN 'active'
                 WHEN u.workos_id IS NULL THEN 'invited'
                 ELSE 'inactive' END AS account_status,
            u.is_active AND EXISTS (SELECT 1 FROM selected_venue WHERE is_active)
@@ -89,12 +88,12 @@ WITH selected_venue AS (
 ), page AS (
     SELECT * FROM matches ORDER BY email, id LIMIT $2 OFFSET $3
 ), summaries AS (
-    SELECT id, workos_id, email, display_name, is_active, archived_at, created_at, updated_at FROM page
+    SELECT id, workos_id, email, display_name, is_active, created_at, updated_at FROM page
 ), details AS (
     SELECT u.id, u.email,
            jsonb_build_object(
                'id', u.id, 'email', u.email, 'displayName', u.display_name, 'workosId', u.workos_id,
-               'isActive', u.is_active, 'archivedAt', u.archived_at, 'canPublish', u.can_publish,
+               'isActive', u.is_active, 'canPublish', u.can_publish,
                'roles', COALESCE((
                    SELECT jsonb_agg(jsonb_build_object('id', ur.id, 'roleId', r.id, 'name', r.name,
                        'scope', r.assignment_type, 'venueId', rr.external_id) ORDER BY r.name, rr.external_id, ur.id)

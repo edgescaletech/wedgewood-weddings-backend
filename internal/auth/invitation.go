@@ -28,7 +28,7 @@ func (server *Server) loginAccount(ctx context.Context, response *workos.Authent
 	var account loginAccount
 	// The schema requires an invitation for every account. Returning users
 	// authenticate with the WorkOS ID already linked during onboarding.
-	err := server.database.QueryRowContext(ctx, `SELECT id FROM users WHERE workos_id=$1 AND archived_at IS NULL AND workos_invitation_id IS NOT NULL`, user.ID).Scan(&account.id)
+	err := server.database.QueryRowContext(ctx, `SELECT id FROM users WHERE workos_id=$1 AND workos_invitation_id IS NOT NULL`, user.ID).Scan(&account.id)
 	if !errors.Is(err, sql.ErrNoRows) || !user.EmailVerified || response.AuthenticationMethod == nil ||
 		*response.AuthenticationMethod != workos.AuthenticateResponseAuthenticationMethodPassword {
 		return account, err
@@ -38,7 +38,7 @@ func (server *Server) loginAccount(ctx context.Context, response *workos.Authent
 	// outcome. Match the identity reserved before that update.
 	err = server.database.QueryRowContext(ctx, `SELECT u.id,u.workos_invitation_id FROM users u
 		JOIN invitation_onboarding o ON o.user_id=u.id AND o.invitation_id=u.workos_invitation_id
-		WHERE u.workos_id IS NULL AND u.archived_at IS NULL AND NOT u.is_active
+		WHERE u.workos_id IS NULL AND NOT u.is_active
 		AND lower(u.email)=$1 AND o.workos_id=$2 AND o.password_started_at < now()-interval '30 seconds'`,
 		strings.ToLower(user.Email), user.ID).Scan(&account.id, &account.invitationID)
 	if err != nil {

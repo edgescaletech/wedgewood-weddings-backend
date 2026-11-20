@@ -17,11 +17,10 @@ func testFilteredDirectory(t *testing.T, db *sql.DB, call adminTestRequest) {
 	}
 	execute(`INSERT INTO venues(id,name,is_active) VALUES
 		('directory-east','Directory East',true),('directory-west','Directory West',false)`)
-	execute(`INSERT INTO users(id,workos_id,email,display_name,is_active,archived_at,workos_invitation_id)
-		VALUES (gen_random_uuid(),'directory-active','aaa-directory@example.test','Directory Person',true,NULL,'directory-active'),
-		       (gen_random_uuid(),NULL,'bbb-directory@example.test','Directory Person',false,NULL,'directory-invited'),
-		       (gen_random_uuid(),'directory-inactive','ccc-directory@example.test','Directory Person',false,NULL,'directory-inactive'),
-		       (gen_random_uuid(),'directory-archived','ddd-directory@example.test','Directory Person',false,now(),'directory-archived')`)
+	execute(`INSERT INTO users(id,workos_id,email,display_name,is_active,workos_invitation_id)
+		VALUES (gen_random_uuid(),'directory-active','aaa-directory@example.test','Directory Person',true,'directory-active'),
+		       (gen_random_uuid(),NULL,'bbb-directory@example.test','Directory Person',false,'directory-invited'),
+		       (gen_random_uuid(),'directory-inactive','ccc-directory@example.test','Directory Person',false,'directory-inactive')`)
 	execute(`INSERT INTO user_roles(id,user_id,role_id,assignment_type,resource_id)
 		SELECT gen_random_uuid(),u.id,r.id,'venue',rr.id FROM users u
 		CROSS JOIN roles r CROSS JOIN rbac_resources rr WHERE u.workos_invitation_id IN ('directory-active','directory-invited')
@@ -38,9 +37,8 @@ func testFilteredDirectory(t *testing.T, db *sql.DB, call adminTestRequest) {
 		total       int
 		publish     bool
 	}{
-		{"/users?search=directory%20person&limit=1&offset=1", "bbb-directory@example.test", 4, false},
-		{"/users?search=directory%20person&limit=1&offset=20", "", 4, false},
-		{"/users?search=directory%20person&status=archived", "ddd-directory@example.test", 1, false},
+		{"/users?search=directory%20person&limit=1&offset=1", "bbb-directory@example.test", 3, false},
+		{"/users?search=directory%20person&limit=1&offset=20", "", 3, false},
 		{"/users?search=directory%20person&status=inactive", "ccc-directory@example.test", 1, false},
 		{"/users?status=invited&role=General+Manager&venueId=directory-east", "bbb-directory@example.test", 1, false},
 		{"/users?role=General+Manager&venueId=directory-east&canPublish=true", "aaa-directory@example.test", 1, true},

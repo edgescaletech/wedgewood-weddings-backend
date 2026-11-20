@@ -118,7 +118,7 @@ func (server *Server) invite(writer http.ResponseWriter, request *http.Request, 
 			}
 			var eligible bool
 			err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id=$1
-                AND archived_at IS NULL AND workos_id IS NULL AND workos_invitation_id=$2)`,
+                AND workos_id IS NULL AND workos_invitation_id=$2)`,
 				userID, operation.priorID).Scan(&eligible)
 			if err == nil && !eligible {
 				return errProvisionConflict
@@ -128,7 +128,7 @@ func (server *Server) invite(writer http.ResponseWriter, request *http.Request, 
 
 		if userID != "" {
 			err = tx.QueryRowContext(ctx, `SELECT email, workos_invitation_id FROM users
-				WHERE id=$1 AND archived_at IS NULL AND workos_id IS NULL AND workos_invitation_id IS NOT NULL FOR UPDATE`,
+				WHERE id=$1 AND workos_id IS NULL AND workos_invitation_id IS NOT NULL FOR UPDATE`,
 				userID).Scan(&operation.email, &operation.priorID)
 		} else {
 			err = operation.validateGrants(ctx, tx, actor, input, false)
@@ -214,7 +214,7 @@ func (server *Server) invite(writer http.ResponseWriter, request *http.Request, 
 			}
 		} else {
 			result, err := tx.ExecContext(ctx, `UPDATE users SET workos_invitation_id=$1,updated_at=now()
-				WHERE id=$2 AND workos_invitation_id=$3 AND workos_id IS NULL AND archived_at IS NULL`,
+				WHERE id=$2 AND workos_invitation_id=$3 AND workos_id IS NULL`,
 				operation.deliveredID.String, userID, operation.priorID.String)
 			if err != nil {
 				return err

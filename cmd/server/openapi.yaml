@@ -17,7 +17,7 @@ paths:
       parameters:
         - {name: search, in: query, schema: {type: string, maxLength: 255}}
         - {name: role, in: query, schema: {type: string}, description: Exact role name. With venueId only the role at that venue or the global Admin role matches.}
-        - {name: status, in: query, schema: {type: string, enum: [active, invited, inactive, archived]}}
+        - {name: status, in: query, schema: {type: string, enum: [active, invited, inactive]}}
         - {name: active, in: query, schema: {type: boolean}, description: Filter by the stored active flag.}
         - {name: venueId, in: query, schema: {type: string, maxLength: 64}}
         - {name: canPublish, in: query, schema: {type: boolean}, description: A true value requires venueId and restricts results to active users who can publish at that active venue.}
@@ -45,7 +45,6 @@ paths:
                             displayName: {type: string}
                             workosId: {type: string, nullable: true}
                             isActive: {type: boolean}
-                            archivedAt: {type: string, format: date-time, nullable: true}
                             canPublish: {type: boolean}
                             roles:
                               type: array
@@ -136,14 +135,6 @@ paths:
         '204': {description: Updated}
         '400': {description: Missing or invalid display name}
         '409': {description: Reactivate the user before editing}
-    delete:
-      summary: Archive a user and remove local sessions (users.manage)
-      security: [{SessionCookie: []}]
-      parameters:
-        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
-      responses:
-        '204': {description: Archived}
-        '409': {description: Last administrator would be removed or the account is deactivated}
   /api/admin/audit:
     get:
       summary: List administrative activity (users.manage)
@@ -235,14 +226,14 @@ paths:
         '200': {description: Venue details}
   /api/admin/users/{id}/activate:
     post:
-      summary: Activate a linked, unarchived local user (users.manage)
+      summary: Activate a linked local user (users.manage)
       security: [{SessionCookie: []}]
       parameters:
         - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
       responses:
         '204': {description: Activated}
         '403': {description: Origin or retained grants exceed the acting admin’s authority}
-        '404': {description: Target missing, archived, or awaiting invitation acceptance}
+        '404': {description: Target missing or awaiting invitation acceptance}
   /api/admin/users/{id}/deactivate:
     post:
       summary: Deactivate a user and remove local sessions (users.manage)

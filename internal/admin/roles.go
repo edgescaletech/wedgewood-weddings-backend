@@ -20,7 +20,6 @@ func (server *Server) registerMutations(mux *http.ServeMux) {
 	register("POST /api/admin/users", "users.manage", server.createUser)
 	register("POST /api/admin/users/{id}/invitation/resend", "users.manage", server.resendInvitation)
 	register("POST /api/admin/users/{id}/deactivate", "users.manage", server.deactivate)
-	register("DELETE /api/admin/users/{id}", "users.manage", server.archive)
 	register("PATCH /api/admin/users/{id}", "users.manage", server.updateUser)
 	register("POST /api/admin/users/{id}/roles", "roles.assign", server.assignRole)
 	register("PUT /api/admin/users/{id}/roles/{assignmentId}", "roles.assign", server.replaceVenueRole)

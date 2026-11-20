@@ -106,7 +106,7 @@ func (server *Server) user(writer http.ResponseWriter, request *http.Request) {
 		respond(writer, http.StatusBadRequest, map[string]string{"error": "invalid user id"})
 		return
 	}
-	server.queryJSON(writer, request, `SELECT jsonb_build_object('id',u.id,'workosId',u.workos_id,'email',u.email,'displayName',u.display_name,'isActive',u.is_active,'archivedAt',u.archived_at,
+	server.queryJSON(writer, request, `SELECT jsonb_build_object('id',u.id,'workosId',u.workos_id,'email',u.email,'displayName',u.display_name,'isActive',u.is_active,
  'roles',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',ur.id,'roleId',r.id,'name',r.name,'scope',r.assignment_type,'venueId',rr.external_id)) FROM user_roles ur JOIN roles r ON r.id=ur.role_id LEFT JOIN rbac_resources rr ON rr.id=ur.resource_id AND rr.resource_type='venue' WHERE ur.user_id=u.id),'[]'::jsonb)) FROM users u WHERE u.id=$1`, id)
 }
 

@@ -37,7 +37,7 @@ func TestAdminRoutesRequireAuthentication(t *testing.T) {
 	for _, endpoint := range []struct{ method, path string }{
 		{http.MethodPost, "/api/admin/users"},
 		{http.MethodPost, "/api/admin/users/00000000-0000-4000-8000-000000000001/roles"},
-		{http.MethodDelete, "/api/admin/users/00000000-0000-4000-8000-000000000001"},
+		{http.MethodDelete, "/api/admin/users/00000000-0000-4000-8000-000000000001/roles/00000000-0000-4000-8000-000000000002"},
 	} {
 		response := httptest.NewRecorder()
 		mux.ServeHTTP(response, httptest.NewRequest(endpoint.method, endpoint.path, nil))

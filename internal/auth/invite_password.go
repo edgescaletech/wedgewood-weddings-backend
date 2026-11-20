@@ -23,7 +23,7 @@ func (server *Server) inviteSession(ctx context.Context, request *http.Request) 
 	err = server.database.QueryRowContext(ctx, `SELECT u.id,u.email,u.display_name,o.invitation_id,o.workos_id,o.password_started_at IS NOT NULL
 		FROM invitation_onboarding o JOIN users u ON u.id=o.user_id AND u.workos_invitation_id=o.invitation_id
 		WHERE o.session_hash=$1 AND o.expires_at>now()
-		AND u.workos_id IS NULL AND NOT u.is_active AND u.archived_at IS NULL`, hash[:]).
+		AND u.workos_id IS NULL AND NOT u.is_active`, hash[:]).
 		Scan(&target.LocalID, &target.Email, &target.DisplayName, &target.Provider.ID, &target.WorkOSID, &started)
 	if err == nil && started {
 		return target, errAcceptedInvite
@@ -92,7 +92,7 @@ func (server *Server) SetInvitePassword(writer http.ResponseWriter, request *htt
 		AND o.user_id=$3 AND o.workos_id=$4 AND lower(u.email)=lower($5)
 		AND o.expires_at>now() AND o.password_started_at IS NULL
 		AND u.id=o.user_id AND u.workos_invitation_id=o.invitation_id
-		AND u.workos_id IS NULL AND NOT u.is_active AND u.archived_at IS NULL
+		AND u.workos_id IS NULL AND NOT u.is_active
 		AND NOT EXISTS(SELECT 1 FROM users WHERE workos_id=o.workos_id)
 		RETURNING u.id,o.invitation_id`, hash[:], input.InvitationID, target.LocalID, user.ID, user.Email).
 		Scan(&account.id, &account.invitationID)

@@ -8,17 +8,14 @@ import (
 )
 
 func (server *Server) activate(writer http.ResponseWriter, request *http.Request) {
-	server.setUserStatus(writer, request, true, false)
+	server.setUserStatus(writer, request, true)
 }
 func (server *Server) deactivate(writer http.ResponseWriter, request *http.Request) {
-	server.setUserStatus(writer, request, false, false)
-}
-func (server *Server) archive(writer http.ResponseWriter, request *http.Request) {
-	server.setUserStatus(writer, request, false, true)
+	server.setUserStatus(writer, request, false)
 }
 
 // setUserStatus changes account status and invalidates local sessions atomically.
-func (server *Server) setUserStatus(writer http.ResponseWriter, request *http.Request, active, archive bool) {
+func (server *Server) setUserStatus(writer http.ResponseWriter, request *http.Request, active bool) {
 	userID := request.PathValue("id")
 	server.mutate(writer, request, "users.manage", func(ctx context.Context, tx *sql.Tx, actor string) error {
 		if !validID(userID) {
@@ -34,7 +31,7 @@ func (server *Server) setUserStatus(writer http.ResponseWriter, request *http.Re
 		} else if err := requireEditableUser(ctx, tx, userID); err != nil {
 			return err
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE users SET is_active=$1,archived_at=CASE WHEN $2 THEN now() ELSE archived_at END,updated_at=now() WHERE id=$3 AND (NOT $1 OR (archived_at IS NULL AND workos_id IS NOT NULL))`, active, archive, userID)
+		result, err := tx.ExecContext(ctx, `UPDATE users SET is_active=$1,updated_at=now() WHERE id=$2 AND (NOT $1 OR workos_id IS NOT NULL)`, active, userID)
 		if err != nil {
 			return err
 		}
@@ -53,9 +50,6 @@ func (server *Server) setUserStatus(writer http.ResponseWriter, request *http.Re
 		action := "user.deactivate"
 		if active {
 			action = "user.activate"
-		}
-		if archive {
-			action = "user.archive"
 		}
 		return audit(ctx, tx, actor, action, "user", userID, nil, map[string]any{"outcome": "success"})
 	})
@@ -78,7 +72,7 @@ func (server *Server) updateUser(writer http.ResponseWriter, request *http.Reque
 		if err := requireEditableUser(ctx, tx, userID); err != nil {
 			return err
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE users SET display_name=$1,updated_at=now() WHERE id=$2 AND archived_at IS NULL`, name, userID)
+		result, err := tx.ExecContext(ctx, `UPDATE users SET display_name=$1,updated_at=now() WHERE id=$2`, name, userID)
 		if err != nil {
 			return err
 		}
@@ -98,7 +92,7 @@ func (server *Server) updateUser(writer http.ResponseWriter, request *http.Reque
 func requireEditableUser(ctx context.Context, tx *sql.Tx, userID string) error {
 	var active, linked bool
 	err := tx.QueryRowContext(ctx, `SELECT is_active, workos_id IS NOT NULL
-		FROM users WHERE id=$1 AND archived_at IS NULL FOR UPDATE`, userID).Scan(&active, &linked)
+		FROM users WHERE id=$1 FOR UPDATE`, userID).Scan(&active, &linked)
 	if err != nil {
 		return err
 	}

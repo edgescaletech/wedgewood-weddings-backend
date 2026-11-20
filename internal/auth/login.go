@@ -137,8 +137,7 @@ func (server *Server) createSession(writer http.ResponseWriter, request *http.Re
 	}
 
 	defer transaction.Rollback()
-	// Bind the verified identity atomically with session creation. An archived
-	// account or a changed invitation cannot be revived by an in-flight sign-in.
+	// Bind the verified identity and current invitation atomically with session creation.
 	err = linkLoginAccount(request.Context(), transaction, account, response.User)
 	// A concurrent invitation or another linked identity may own this email.
 	// Roll back the identity update before issuing any session.
@@ -184,7 +183,7 @@ func (server *Server) createSession(writer http.ResponseWriter, request *http.Re
 func linkLoginAccount(ctx context.Context, tx *sql.Tx, account loginAccount, user *workos.User) error {
 	result, err := tx.ExecContext(ctx, `UPDATE users SET workos_id=$1,email=$2,
 		is_active=CASE WHEN $4::text IS NOT NULL THEN true ELSE is_active END,updated_at=now()
-		WHERE id=$3 AND archived_at IS NULL AND (
+		WHERE id=$3 AND (
 			($4::text IS NULL AND workos_id=$1) OR
 			(workos_id IS NULL AND workos_invitation_id=$4 AND lower(email)=lower($2))
 		)`, user.ID, user.Email, account.id, account.invitationID)

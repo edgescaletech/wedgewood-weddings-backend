@@ -149,7 +149,7 @@ func (server *Server) SendInviteCode(writer http.ResponseWriter, request *http.R
 	var requestedAt time.Time
 	err = server.database.QueryRowContext(ctx, `INSERT INTO invitation_onboarding (invitation_id,user_id,code_requested_at)
 		SELECT workos_invitation_id,id,now() FROM users WHERE id=$1 AND workos_invitation_id=$2
-			AND workos_id IS NULL AND archived_at IS NULL AND NOT is_active
+			AND workos_id IS NULL AND NOT is_active
 		ON CONFLICT (invitation_id) DO UPDATE SET code_requested_at=now()
 		WHERE invitation_onboarding.password_started_at IS NULL
 			AND invitation_onboarding.code_requested_at <= now()-($3 * interval '1 second')
@@ -277,7 +277,7 @@ func (server *Server) VerifyInviteEmail(writer http.ResponseWriter, request *htt
 	result, err := server.database.ExecContext(ctx, `UPDATE invitation_onboarding o
 		SET workos_id=$1,session_hash=$2,expires_at=now()+interval '10 minutes'
 		FROM users u WHERE o.invitation_id=$3 AND o.user_id=$4 AND u.id=o.user_id
-		AND u.workos_invitation_id=o.invitation_id AND u.workos_id IS NULL AND u.archived_at IS NULL
+		AND u.workos_invitation_id=o.invitation_id AND u.workos_id IS NULL
 		AND NOT u.is_active AND lower(u.email)=lower($5) AND o.password_started_at IS NULL
 		AND (o.workos_id IS NULL OR o.workos_id=$1)
 		AND NOT EXISTS(SELECT 1 FROM invitation_onboarding WHERE user_id=u.id AND password_started_at IS NOT NULL)
@@ -319,7 +319,7 @@ func (server *Server) pendingInvitation(ctx context.Context, token string) (pend
 		COALESCE(o.code_sent_at>now()-interval '10 minutes',false),
 		GREATEST(0, CEIL(EXTRACT(EPOCH FROM o.code_requested_at-now()))+$2)::int
 		FROM users u LEFT JOIN invitation_onboarding o ON o.invitation_id=u.workos_invitation_id AND o.user_id=u.id
-		WHERE u.workos_invitation_id=$1 AND u.archived_at IS NULL`, invite.ID, inviteResendSeconds).
+		WHERE u.workos_invitation_id=$1`, invite.ID, inviteResendSeconds).
 		Scan(&target.LocalID, &target.Email, &target.DisplayName, &linked, &started, &codeDelivered, &target.CodeRecentlyRequested, &target.RetryAfterSeconds)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && !strings.EqualFold(target.Email, invite.Email)) {
 		return target, errInvalidInvite

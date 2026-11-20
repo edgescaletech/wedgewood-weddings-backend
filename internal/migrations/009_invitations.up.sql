@@ -3,7 +3,7 @@ BEGIN;
 ALTER TABLE users ALTER COLUMN workos_id DROP NOT NULL;
 ALTER TABLE users ADD COLUMN workos_invitation_id TEXT NOT NULL UNIQUE;
 ALTER TABLE users ADD CONSTRAINT users_active_identity_required
-    CHECK (NOT is_active OR (archived_at IS NULL AND workos_id IS NOT NULL));
+    CHECK (NOT is_active OR workos_id IS NOT NULL);
 CREATE UNIQUE INDEX users_email_owner ON users (lower(email));
 
 CREATE TABLE user_invitation_operations (

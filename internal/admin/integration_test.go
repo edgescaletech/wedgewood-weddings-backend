@@ -99,6 +99,13 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 			t.Fatalf("%s: %v", file, err)
 		}
 	}
+	var hasArchiveColumn bool
+	if err := db.QueryRow(`SELECT EXISTS (
+		SELECT 1 FROM information_schema.columns
+		WHERE table_schema=current_schema() AND table_name='users' AND column_name='archived_at'
+	)`).Scan(&hasArchiveColumn); err != nil || hasArchiveColumn {
+		t.Fatalf("unexpected archive column in migrated schema: exists=%t err=%v", hasArchiveColumn, err)
+	}
 	ids := []string{uuid.NewString(), uuid.NewString()}
 	for index, id := range ids {
 		if _, err = db.Exec(`INSERT INTO users(id,workos_id,email,is_active,workos_invitation_id) VALUES($1,$2,$2,true,'inv-' || $2)`, id, "workos-"+string(rune('a'+index))); err != nil {
@@ -236,8 +243,8 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 		t.Fatalf("uppercase self deactivation: %d", response.Code)
 	}
 	response = call(http.MethodDelete, "/api/admin/users/"+strings.ToUpper(ids[0]), "")
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("uppercase self archival: %d", response.Code)
+	if response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("unexpected DELETE user status: %d", response.Code)
 	}
 	response = call(http.MethodPost, "/api/admin/users/not-a-uuid/deactivate", "")
 	if response.Code != http.StatusBadRequest {
@@ -363,10 +370,6 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	if response := call(http.MethodPost, resendPath, ""); response.Code != http.StatusNoContent {
 		t.Fatalf("expired resend: %d %s", response.Code, response.Body)
 	}
-	exec(`UPDATE users SET archived_at=now() WHERE id=$1`, invitedID)
-	if _, err := db.Exec(`UPDATE users SET is_active=true,workos_id='test-archived' WHERE id=$1`, invitedID); err == nil {
-		t.Fatal("archived activation bypassed database check")
-	}
 	server.Identity = testIdentityProvider{send: func(_ context.Context, email, _ string) (*workos.UserInvite, error) {
 		return nil, &workos.APIError{StatusCode: 422}
 	}}
@@ -414,7 +417,6 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 		}
 		for _, request := range []struct{ method, path, body string }{
 			{http.MethodPatch, userPath, `{"displayName":"Changed"}`},
-			{http.MethodDelete, userPath, ""},
 			{http.MethodPost, rolesPath, `{"roleId":"00000000-0000-4000-8000-000000000001"}`},
 			{http.MethodPut, assignmentPath, `{"roleId":"00000000-0000-4000-8000-000000000002"}`},
 			{http.MethodDelete, assignmentPath, ""},
