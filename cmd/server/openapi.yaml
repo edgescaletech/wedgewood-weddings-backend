@@ -9,26 +9,313 @@ paths:
       summary: Health check
       responses:
         '200': {description: Healthy}
-  /auth/signup:
+  /api/admin/users:
+    get:
+      summary: List local users (users.view)
+      security: [{SessionCookie: []}]
+      description: Searches names and emails. Without view, returns the existing summary array. With view=directory, returns the filtered total and the requested page with role assignments.
+      parameters:
+        - {name: search, in: query, schema: {type: string, maxLength: 255}}
+        - {name: role, in: query, schema: {type: string}, description: Exact role name. With venueId only the role at that venue or the global Admin role matches.}
+        - {name: status, in: query, schema: {type: string, enum: [active, invited, inactive]}}
+        - {name: active, in: query, schema: {type: boolean}, description: Filter by the stored active flag.}
+        - {name: venueId, in: query, schema: {type: string, maxLength: 64}}
+        - {name: canPublish, in: query, schema: {type: boolean}, description: A true value requires venueId and restricts results to active users who can publish at that active venue.}
+        - {name: view, in: query, schema: {type: string, enum: [directory]}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0}}
+      responses:
+        '200':
+          description: User summaries or a directory page.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - {type: array, items: {type: object}}
+                  - type: object
+                    required: [items, total]
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: {type: string, format: uuid}
+                            email: {type: string}
+                            displayName: {type: string}
+                            workosId: {type: string, nullable: true}
+                            isActive: {type: boolean}
+                            canPublish: {type: boolean}
+                            roles:
+                              type: array
+                              items:
+                                type: object
+                                properties:
+                                  id: {type: string, format: uuid}
+                                  roleId: {type: string, format: uuid}
+                                  name: {type: string}
+                                  scope: {type: string}
+                                  venueId: {type: string, nullable: true}
+                      total: {type: integer, minimum: 0}
+        '400': {description: Invalid filters or pagination}
+        '401': {description: Authentication required}
+        '403': {description: Permission denied}
     post:
-      summary: Temporarily create a WorkOS password account
-      description: Requires an Origin matching APP_URL. Sign in afterward to verify email and create the local user.
+      summary: Invite a user (users.manage)
+      description: Requires matching Origin. Initial roles also require roles.assign and venue grants require venues.manage_access. Assign at most one role per venue. WorkOS sends an application invitation. The local account is activated when invitation setup completes.
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: Idempotency-Key, in: header, required: true, schema: {type: string, format: uuid}}
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [email, password]
+              additionalProperties: false
+              required: [email, displayName]
               properties:
-                email: {type: string, format: email}
-                password: {type: string, format: password}
+                email: {type: string, format: email, maxLength: 254}
+                displayName: {type: string, maxLength: 200}
+                roles:
+                  type: array
+                  maxItems: 50
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [roleId]
+                    properties:
+                      roleId: {type: string, format: uuid}
+                      venueId: {type: string, nullable: true, maxLength: 64}
       responses:
-        '204': {description: WorkOS account created}
-        '400': {description: Invalid details or account cannot be created}
-        '403': {description: Invalid origin}
-        '429': {description: Signup limit reached; retry after the indicated delay}
-        '503': {description: Signup temporarily unavailable}
+        '204': {description: Invitation delivered and pending local user recorded}
+        '400': {description: Invalid request or invitation details rejected by WorkOS}
+        '401': {description: Authentication required}
+        '403': {description: Origin or grant not authorized}
+        '404': {description: Role or venue not found}
+        '409': {description: Conflicting operation, existing local account, or replaced invitation venue}
+        '415': {description: Expected application/json}
+        '503': {description: Invitation could not be finalized. Retry with the same key and request.}
+  /api/admin/users/{id}/invitation/resend:
+    post:
+      summary: Resend or replace an invitation (users.manage)
+      description: Resends a pending invitation or replaces an expired one. Requires matching Origin.
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: Idempotency-Key, in: header, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '204': {description: Invitation sent}
+        '400': {description: Invalid request or invitation rejected by WorkOS}
+        '401': {description: Authentication required}
+        '403': {description: Origin or permission denied}
+        '404': {description: No pending local invitation for this user}
+        '409': {description: Invitation can no longer be resent or operation conflicts}
+        '503': {description: Invitation could not be finalized. Retry with the same key.}
+  /api/admin/users/{id}:
+    get:
+      summary: Get user and assigned roles (users.view)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200': {description: User details}
+        '404': {description: User not found}
+    patch:
+      summary: Update local display name (users.manage)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [displayName], properties: {displayName: {type: string, minLength: 1, description: Must contain a non-whitespace character}}}
+      responses:
+        '204': {description: Updated}
+        '400': {description: Missing or invalid display name}
+        '409': {description: Reactivate the user before editing}
+  /api/admin/audit:
+    get:
+      summary: List administrative activity (users.manage)
+      description: Returns recent audit records for account and target activity. A deleted or unavailable actor is shown as Unavailable actor; historical target and resource identifiers remain available.
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 50}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0, default: 0}}
+      responses:
+        '200':
+          description: A page of recent audit events and total count.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total]
+                properties:
+                  total: {type: integer, minimum: 0}
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, action, actorName, metadata, createdAt]
+                      properties:
+                        id: {type: string, format: uuid}
+                        action: {type: string}
+                        actorName: {type: string}
+                        actorEmail: {type: string}
+                        targetType: {type: string}
+                        targetId: {type: string}
+                        targetName: {type: string}
+                        resourceType: {type: string}
+                        resourceExternalId: {type: string}
+                        metadata: {type: object, additionalProperties: true}
+                        createdAt: {type: string, format: date-time}
+        '400': {description: Invalid pagination values}
+        '401': {description: Authentication required}
+        '403': {description: users.manage permission required}
+        '503': {description: Audit history is temporarily unavailable}
+  /api/admin/roles:
+    get:
+      summary: List predefined roles and current permissions (roles.view)
+      security: [{SessionCookie: []}]
+      responses:
+        '200': {description: Role list}
+  /api/admin/roles/{id}:
+    get:
+      summary: Get a predefined role and permissions (roles.view)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200': {description: Role details}
+  /api/admin/roles/{id}/permissions:
+    get:
+      summary: Get permissions for a role (roles.view)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200': {description: Role and permissions}
+  /api/admin/permissions:
+    get:
+      summary: List permission definitions (roles.view)
+      security: [{SessionCookie: []}]
+      responses:
+        '200': {description: Permission list}
+  /api/admin/venues:
+    get:
+      summary: List venues (venues.manage_access)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: search, in: query, schema: {type: string, maxLength: 255}, description: Case-insensitive venue name search.}
+        - {name: region, in: query, schema: {type: string, maxLength: 100}, description: Exact venue region as returned by the directory.}
+        - {name: active, in: query, schema: {type: boolean}}
+        - {name: view, in: query, schema: {type: string, enum: [directory]}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0}}
+      responses:
+        '200': {description: 'Venue array by default. With view=directory, returns {items, total, regions}. Regions are distinct nonblank options in the active filter scope, independent of name search, region filter, and pagination.'}
+        '400': {description: Invalid filters or pagination}
+  /api/admin/venues/{id}:
+    get:
+      summary: Get a venue by Salesforce ID (venues.manage_access)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Venue details}
+  /api/admin/users/{id}/activate:
+    post:
+      summary: Activate a linked local user (users.manage)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '204': {description: Activated}
+        '403': {description: Origin or retained grants exceed the acting admin’s authority}
+        '404': {description: Target missing or awaiting invitation acceptance}
+  /api/admin/users/{id}/deactivate:
+    post:
+      summary: Deactivate a user and remove local sessions (users.manage)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '204': {description: Deactivated}
+        '409': {description: Last administrator protection or the account is already deactivated}
+  /api/admin/users/{id}/roles:
+    get:
+      summary: List assigned roles (users.view)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200': {description: Assignments}
+    post:
+      summary: Assign a predefined role (roles.assign and venues.manage_access for venue roles)
+      description: Supply an active Salesforce venue ID for venue roles. Omit venueId or use null for global roles.
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [roleId], properties: {roleId: {type: string, format: uuid}, venueId: {type: string, nullable: true}}}
+      responses:
+        '204': {description: Assigned}
+        '400': {description: Invalid assignment or inactive venue}
+        '404': {description: Role or venue not found}
+        '409': {description: User already has a role at this venue or the account is deactivated}
+  /api/admin/users/{id}/roles/{assignmentId}:
+    put:
+      summary: Replace the role at an existing venue assignment
+      description: Requires roles.assign, venues.manage_access, and authority to grant the replacement role. The old assignment is replaced atomically at the same venue and the change is audited. Read the user again to obtain the new assignment ID.
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: assignmentId, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: false, required: [roleId], properties: {roleId: {type: string, format: uuid}}}
+      responses:
+        '204': {description: Venue role updated}
+        '400': {description: Invalid role or inactive venue}
+        '401': {description: Authentication required}
+        '403': {description: Permission denied}
+        '404': {description: Venue assignment or role missing}
+        '409': {description: Reactivate the user before changing assignments}
+    delete:
+      summary: Remove a role assignment (roles.assign and venues.manage_access for venue roles)
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: assignmentId, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '204': {description: Removed}
+        '409': {description: Last administrator protection or the account is deactivated}
+  /api/admin/users/{id}/permissions:
+    get:
+      summary: Show role-derived permissions (users.view)
+      description: Inactive venues deny scoped permissions. Global management permissions are evaluated independently.
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: venueId, in: query, schema: {type: string}}
+      responses:
+        '200': {description: 'Array of permission, inherited, and effective fields. Inherited and effective are equal under role-only RBAC.'}
+        '404': {description: User or venue not found}
+  /api/admin/venues/{id}/users:
+    get:
+      summary: List direct venue role assignments (venues.manage_access)
+      description: Includes grants at suspended venues so administrators can inspect and revoke them.
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Venue users}
   /auth/password:
     post:
       summary: Sign in with email and password
@@ -48,9 +335,122 @@ paths:
         '202': {description: Email verification required; an encrypted challenge cookie is set}
         '400': {description: Invalid request}
         '401': {description: Sign-in failed or requires additional verification}
-        '403': {description: Invalid origin}
+        '403': {description: Invalid origin or no eligible local account}
+        '409': {description: Another local account owns this email}
         '429': {description: Too many attempts}
         '503': {description: Authentication unavailable}
+  /auth/invite:
+    post:
+      summary: Load or resume an application invitation
+      description: Requires an Origin matching APP_URL. An explicit invitation token starts the flow. An empty object resumes from the HttpOnly cookies.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                token: {type: string, maxLength: 512}
+      responses:
+        '200':
+          description: Read-only invitation profile
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [displayName, email, invitationId, step, retryAfterSeconds]
+                properties:
+                  displayName: {type: string}
+                  email: {type: string, format: email}
+                  invitationId: {type: string}
+                  step: {type: string, enum: [details, verify, password]}
+                  retryAfterSeconds: {type: integer, minimum: 0, description: Seconds remaining before another code can be requested}
+        '400': {description: Invalid request}
+        '403': {description: Invalid origin}
+        '404': {description: Invalid invitation or no eligible local account}
+        '409': {description: Invitation already accepted or password setup already attempted}
+        '410': {description: Expired or revoked invitation}
+        '415': {description: Expected application/json}
+        '503': {description: Invitation lookup temporarily unavailable}
+  /auth/invite/send-code:
+    post:
+      summary: Send a WorkOS Magic Auth code to the invited email
+      description: Requires a matching Origin and the invitation context cookie. The browser does not supply the email.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: false}
+      responses:
+        '204':
+          description: Verification requested
+          headers:
+            Retry-After:
+              schema: {type: integer, example: 30}
+        '400': {description: Invalid request}
+        '403': {description: Invalid origin}
+        '404': {description: Invalid invitation}
+        '409': {description: Invitation already accepted or password setup already attempted}
+        '410': {description: Expired or revoked invitation}
+        '415': {description: Expected application/json}
+        '429':
+          description: Code resend cooldown or WorkOS rate limit
+          headers:
+            Retry-After:
+              schema: {type: integer, example: 30}
+        '503': {description: Verification temporarily unavailable}
+  /auth/invite/verify:
+    post:
+      summary: Verify a WorkOS Magic Auth code for invitation onboarding
+      description: Requires a matching Origin and the invitation context cookie. Sets a ten-minute onboarding cookie after checking the exact accepted invitation and verified identity.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              additionalProperties: false
+              properties:
+                code: {type: string, pattern: '^[0-9]{6}$'}
+      responses:
+        '204': {description: Recipient verified and onboarding session issued}
+        '400': {description: Invalid or expired code}
+        '403': {description: Invalid origin}
+        '404': {description: Invalid invitation or mismatched identity}
+        '409': {description: Invitation or identity is ineligible for setup}
+        '410': {description: Expired or revoked invitation}
+        '415': {description: Expected application/json}
+        '429': {description: WorkOS rate limit}
+        '503': {description: Temporary provider or database failure}
+  /auth/invite/password:
+    post:
+      summary: Set the verified invitee's first password
+      description: Requires a matching Origin and an active onboarding cookie. The server selects the WorkOS user from the session. Success links and activates the local account and consumes the cookie without creating an application session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [invitationId, password, confirmPassword]
+              additionalProperties: false
+              properties:
+                invitationId: {type: string}
+                password: {type: string, format: password}
+                confirmPassword: {type: string, format: password}
+      responses:
+        '204': {description: Password set and local account linked and activated}
+        '400': {description: Invalid request or passwords do not match}
+        '401': {description: Onboarding session missing, expired, or changed}
+        '403': {description: Invalid origin}
+        '404': {description: Accepted invitation or identity no longer matches}
+        '409': {description: Password setup already started}
+        '415': {description: Expected application/json}
+        '422': {description: Password rejected by WorkOS}
+        '429': {description: WorkOS rate limit}
+        '503': {description: Password setup could not be confirmed}
   /auth/verify-email:
     post:
       summary: Complete email verification after password sign-in
@@ -67,6 +467,7 @@ paths:
       responses:
         '204': {description: Email verified and session cookie created}
         '401': {description: Invalid or expired challenge}
+        '409': {description: Another local account owns this email}
         '403': {description: Invalid origin}
         '503': {description: Verification temporarily unavailable}
   /auth/forgot-password:
@@ -120,6 +521,7 @@ paths:
       responses:
         '303': {description: Session created; redirect to application}
         '400': {description: Invalid state}
+        '409': {description: Another local account owns this email}
         '401': {description: Authentication failed}
   /auth/me:
     get:
@@ -133,6 +535,51 @@ paths:
               schema: {$ref: '#/components/schemas/User'}
         '401': {description: Unauthenticated}
         '403': {description: Inactive account}
+  /auth/access:
+    get:
+      summary: Get the current user's global and venue access
+      description: Roles are listed where directly assigned. Each visible venue includes the union of its direct permissions and global permissions. Venues are keyed by Salesforce venue ID. The predefined global Admin role can see every active venue. Other users see active venues with direct assignments.
+      security: [{SessionCookie: []}]
+      responses:
+        '200':
+          description: Current database-backed access
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [global, venues]
+                properties:
+                  global: {$ref: '#/components/schemas/AccessGrants'}
+                  venues:
+                    type: object
+                    additionalProperties: {$ref: '#/components/schemas/AccessGrants'}
+        '401': {description: Authentication required}
+        '403': {description: Inactive account}
+        '503': {description: Authentication or authorization unavailable}
+  /api/me/venues:
+    get:
+      summary: List active venues visible to the current user
+      description: The predefined global Admin role can see every active venue. Other users see active venues with direct assignments. Results are ordered by venue name, then ID. Roles are those assigned directly at each venue.
+      security: [{SessionCookie: []}]
+      responses:
+        '200':
+          description: Visible venues
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, name, roles]
+                  properties:
+                    id: {type: string, description: Salesforce venue ID}
+                    name: {type: string}
+                    roles:
+                      type: array
+                      items: {type: string}
+        '401': {description: Authentication required}
+        '403': {description: Inactive account}
+        '503': {description: Authentication or venue information unavailable}
   /auth/logout:
     post:
       summary: End the current session
@@ -201,6 +648,16 @@ components:
   securitySchemes:
     SessionCookie: {type: apiKey, in: cookie, name: session}
   schemas:
+    AccessGrants:
+      type: object
+      required: [roles, permissions]
+      properties:
+        roles:
+          type: array
+          items: {type: string}
+        permissions:
+          type: array
+          items: {type: string}
     User:
       type: object
       required: [id, workosId, email, isActive]

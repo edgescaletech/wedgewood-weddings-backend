@@ -137,7 +137,7 @@ func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) 
 	return f(request)
 }
 
-func TestCallbackCreatesInactiveUser(t *testing.T) {
+func TestCallbackUsesExistingAccount(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -153,8 +153,9 @@ func TestCallbackCreatesInactiveUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mock.ExpectQuery("SELECT id FROM users WHERE workos_id").WithArgs("user_1").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("local-user"))
 	mock.ExpectBegin()
-	mock.ExpectExec("INSERT INTO users").WithArgs(sqlmock.AnyArg(), "user_1", "person@example.com").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE users SET workos_id").WithArgs("user_1", "person@example.com", "local-user", nil).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO auth_sessions").WithArgs(sqlmock.AnyArg(), "user_1", sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	request := httptest.NewRequest(http.MethodGet, "/auth/callback?code=code&state=valid", nil)
@@ -163,6 +164,9 @@ func TestCallbackCreatesInactiveUser(t *testing.T) {
 	server.Callback(recorder, request)
 	if recorder.Code != http.StatusSeeOther {
 		t.Fatalf("callback status: %d", recorder.Code)
+	}
+	if location := recorder.Header().Get("Location"); location != "https://app.example/login" {
+		t.Fatalf("callback location: %q", location)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
