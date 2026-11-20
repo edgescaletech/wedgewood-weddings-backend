@@ -99,6 +99,16 @@ The Users & Access directory requests `GET /api/admin/users?view=directory` with
      -v display_name='First Admin'
    ```
 
+To get the invitation_id : 
+   ```
+   curl -fsSG 'https://api.workos.com/user_management/invitations' \
+  -H "Authorization: Bearer $workos_api_key" \
+  --data-urlencode 'email=your_email' |
+  jq '.data[] | {id, email, state, accepted_user_id}'
+
+   ```
+
+
 The script creates the active local user, assigns the global Admin role, and writes an audit record in one transaction. It stops if the Admin role is already assigned or the user ID, invitation ID, or email already exists. The operator verifies the WorkOS values before running SQL. After seeding, point the invitation URL to `/invite`. The first Admin can then sign in and invite subsequent users through the Admin API.
 
 Existing venue identifiers are Salesforce text IDs, not UUIDs. A resource permission check requires an active local user and active registry entry. It combines grants from global roles and roles assigned directly to that resource. Administrative permissions use an explicit global check. Existing event routes remain authenticated but are not yet governed by scheduling permissions.
