@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
@@ -97,7 +98,7 @@ func (server *Server) createSession(writer http.ResponseWriter, request *http.Re
 
 	// Resolve an existing account, or a pending invitation whose recipient
 	// WorkOS can prove is this exact authenticated subject.
-	account, err := server.loginAccount(request.Context(), response.User)
+	account, err := server.loginAccount(request.Context(), response)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			fail(writer, http.StatusForbidden, "account unavailable; contact your administrator")
@@ -138,11 +139,7 @@ func (server *Server) createSession(writer http.ResponseWriter, request *http.Re
 	defer transaction.Rollback()
 	// Bind the verified identity atomically with session creation. An archived
 	// account or a changed invitation cannot be revived by an in-flight sign-in.
-	result, err := transaction.ExecContext(request.Context(),
-		`UPDATE users SET workos_id=$1,email=$2,updated_at=now()
-   WHERE id=$3 AND archived_at IS NULL
-     AND (($4::text IS NULL AND workos_id=$1) OR (workos_id IS NULL AND workos_invitation_id=$4))`,
-		c.Subject, response.User.Email, account.id, account.invitationID)
+	err = linkLoginAccount(request.Context(), transaction, account, response.User)
 	// A concurrent invitation or another linked identity may own this email.
 	// Roll back the identity update before issuing any session.
 	var ownershipError *pq.Error
@@ -151,19 +148,9 @@ func (server *Server) createSession(writer http.ResponseWriter, request *http.Re
 		return
 	}
 
-	if err == nil {
-		var count int64
-		count, err = result.RowsAffected()
-		if err == nil && count == 0 {
-			fail(writer, http.StatusForbidden, "account unavailable; contact your administrator")
-			return
-		}
-	}
-	if err == nil && account.invitationID.Valid {
-		_, err = transaction.ExecContext(request.Context(), `INSERT INTO audit_logs
-   (id,action,target_type,target_id,metadata) VALUES
-   (gen_random_uuid(),'user.invitation.accept','user',$1,jsonb_build_object('invitationId',$2::text))`,
-			account.id, account.invitationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		fail(writer, http.StatusForbidden, "account unavailable; contact your administrator")
+		return
 	}
 
 	if err == nil {
@@ -190,4 +177,35 @@ func (server *Server) createSession(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	http.Redirect(writer, request, strings.TrimRight(server.config.AppURL, "/")+"/login", http.StatusSeeOther)
+}
+
+// linkLoginAccount binds a verified identity and records acceptance in the same
+// transaction. Admin activation and the saved profile and grants are unaffected.
+func linkLoginAccount(ctx context.Context, tx *sql.Tx, account loginAccount, user *workos.User) error {
+	result, err := tx.ExecContext(ctx, `UPDATE users SET workos_id=$1,email=$2,updated_at=now()
+		WHERE id=$3 AND archived_at IS NULL AND (
+			($4::text IS NULL AND workos_id=$1) OR
+			(workos_id IS NULL AND workos_invitation_id=$4 AND lower(email)=lower($2))
+		)`, user.ID, user.Email, account.id, account.invitationID)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return sql.ErrNoRows
+	}
+	if account.invitationID.Valid {
+		_, err = tx.ExecContext(ctx, `INSERT INTO audit_logs
+			(id,action,target_type,target_id,metadata) VALUES
+			(gen_random_uuid(),'user.invitation.accept','user',$1,jsonb_build_object('invitationId',$2::text))`,
+			account.id, account.invitationID)
+		if err == nil {
+			_, err = tx.ExecContext(ctx, `DELETE FROM invitation_onboarding WHERE invitation_id=$1 AND user_id=$2`,
+				account.invitationID, account.id)
+		}
+	}
+	return err
 }

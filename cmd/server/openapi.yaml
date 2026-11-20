@@ -347,6 +347,109 @@ paths:
         '409': {description: Another local account owns this email}
         '429': {description: Too many attempts}
         '503': {description: Authentication unavailable}
+  /auth/invite:
+    post:
+      summary: Load or resume an application invitation
+      description: Requires an Origin matching APP_URL. An explicit invitation token starts the flow. An empty object resumes from the HttpOnly cookies.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                token: {type: string, maxLength: 512}
+      responses:
+        '200':
+          description: Read-only invitation profile
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [displayName, email, invitationId, step]
+                properties:
+                  displayName: {type: string}
+                  email: {type: string, format: email}
+                  invitationId: {type: string}
+                  step: {type: string, enum: [details, verify, password]}
+        '400': {description: Invalid request}
+        '403': {description: Invalid origin}
+        '404': {description: Invalid invitation or no eligible local account}
+        '409': {description: Invitation already accepted or password setup already attempted}
+        '410': {description: Expired or revoked invitation}
+        '415': {description: Expected application/json}
+        '503': {description: Invitation lookup temporarily unavailable}
+  /auth/invite/send-code:
+    post:
+      summary: Send a WorkOS Magic Auth code to the invited email
+      description: Requires a matching Origin and the invitation context cookie. The browser does not supply the email.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: false}
+      responses:
+        '204': {description: Verification requested}
+        '400': {description: Invalid request}
+        '403': {description: Invalid origin}
+        '404': {description: Invalid invitation}
+        '409': {description: Invitation already accepted or password setup already attempted}
+        '410': {description: Expired or revoked invitation}
+        '415': {description: Expected application/json}
+        '429': {description: Code resend cooldown or WorkOS rate limit}
+        '503': {description: Verification temporarily unavailable}
+  /auth/invite/verify:
+    post:
+      summary: Verify a WorkOS Magic Auth code for invitation onboarding
+      description: Requires a matching Origin and the invitation context cookie. Sets a ten-minute onboarding cookie after checking the exact accepted invitation and verified identity.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              additionalProperties: false
+              properties:
+                code: {type: string, pattern: '^[0-9]{6}$'}
+      responses:
+        '204': {description: Recipient verified and onboarding session issued}
+        '400': {description: Invalid or expired code}
+        '403': {description: Invalid origin}
+        '404': {description: Invalid invitation or mismatched identity}
+        '409': {description: Invitation or identity is ineligible for setup}
+        '410': {description: Expired or revoked invitation}
+        '415': {description: Expected application/json}
+        '429': {description: WorkOS rate limit}
+        '503': {description: Temporary provider or database failure}
+  /auth/invite/password:
+    post:
+      summary: Set the verified invitee's first password
+      description: Requires a matching Origin and an active onboarding cookie. The server selects the WorkOS user from the session. Success links the inactive local account and consumes the cookie without creating an application session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [invitationId, password, confirmPassword]
+              additionalProperties: false
+              properties:
+                invitationId: {type: string}
+                password: {type: string, format: password}
+                confirmPassword: {type: string, format: password}
+      responses:
+        '204': {description: Password set and inactive local account linked}
+        '400': {description: Invalid request or passwords do not match}
+        '401': {description: Onboarding session missing, expired, or changed}
+        '403': {description: Invalid origin}
+        '404': {description: Accepted invitation or identity no longer matches}
+        '409': {description: Password setup already started}
+        '415': {description: Expected application/json}
+        '422': {description: Password rejected by WorkOS}
+        '429': {description: WorkOS rate limit}
+        '503': {description: Password setup could not be confirmed}
   /auth/verify-email:
     post:
       summary: Complete email verification after password sign-in

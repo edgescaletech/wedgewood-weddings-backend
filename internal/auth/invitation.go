@@ -23,20 +23,24 @@ func (provider workOS) GetInvitation(ctx context.Context, id string) (*workos.Us
 	return provider.c.UserManagement().GetInvitation(ctx, id)
 }
 
-func (server *Server) loginAccount(ctx context.Context, user *workos.User) (loginAccount, error) {
+func (server *Server) loginAccount(ctx context.Context, response *workos.AuthenticateResponse) (loginAccount, error) {
+	user := response.User
 	var account loginAccount
 	// The schema requires an invitation for every account. Returning users
 	// authenticate with the WorkOS ID already linked during onboarding.
 	err := server.database.QueryRowContext(ctx, `SELECT id FROM users WHERE workos_id=$1 AND archived_at IS NULL AND workos_invitation_id IS NOT NULL`, user.ID).Scan(&account.id)
-	if !errors.Is(err, sql.ErrNoRows) || !user.EmailVerified {
+	if !errors.Is(err, sql.ErrNoRows) || !user.EmailVerified || response.AuthenticationMethod == nil ||
+		*response.AuthenticationMethod != workos.AuthenticateResponseAuthenticationMethodPassword {
 		return account, err
 	}
 
-	// Email locates a candidate only. WorkOS must attest acceptance by the
-	// exact user ID in the cryptographically verified authentication response.
-	err = server.database.QueryRowContext(ctx, `SELECT id,workos_invitation_id FROM users
-		WHERE workos_id IS NULL AND archived_at IS NULL AND workos_invitation_id IS NOT NULL AND lower(email)=$1`,
-		strings.ToLower(user.Email)).Scan(&account.id, &account.invitationID)
+	// Password sign-in can reconcile a password update with an ambiguous
+	// outcome. Match the identity reserved before that update.
+	err = server.database.QueryRowContext(ctx, `SELECT u.id,u.workos_invitation_id FROM users u
+		JOIN invitation_onboarding o ON o.user_id=u.id AND o.invitation_id=u.workos_invitation_id
+		WHERE u.workos_id IS NULL AND u.archived_at IS NULL AND NOT u.is_active
+		AND lower(u.email)=$1 AND o.workos_id=$2 AND o.password_started_at < now()-interval '30 seconds'`,
+		strings.ToLower(user.Email), user.ID).Scan(&account.id, &account.invitationID)
 	if err != nil {
 		return account, err
 	}
@@ -50,10 +54,15 @@ func (server *Server) loginAccount(ctx context.Context, user *workos.User) (logi
 	if err != nil {
 		return account, err
 	}
-	if invitation == nil || invitation.ID != account.invitationID.String ||
-		string(invitation.State) != "accepted" || invitation.AcceptedUserID == nil ||
-		*invitation.AcceptedUserID != user.ID || !strings.EqualFold(invitation.Email, user.Email) {
+	if !acceptedInvitationMatches(invitation, account.invitationID.String, user) {
 		return account, sql.ErrNoRows
 	}
 	return account, nil
+}
+
+// Acceptance must come from WorkOS for this exact invitation and authenticated user.
+func acceptedInvitationMatches(invitation *workos.UserInvite, id string, user *workos.User) bool {
+	return invitation != nil && invitation.ID == id &&
+		string(invitation.State) == "accepted" && invitation.AcceptedUserID != nil &&
+		*invitation.AcceptedUserID == user.ID && strings.EqualFold(invitation.Email, user.Email)
 }

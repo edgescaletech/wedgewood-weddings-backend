@@ -422,6 +422,10 @@ func main() {
 func registerAuthRoutes(mux *http.ServeMux, authServer *auth.Server) {
 	mux.HandleFunc("/auth/login", authServer.Login)
 	mux.HandleFunc("/auth/password", authServer.PasswordLogin)
+	mux.HandleFunc("/auth/invite", authServer.InviteDetails)
+	mux.HandleFunc("/auth/invite/send-code", authServer.SendInviteCode)
+	mux.HandleFunc("/auth/invite/password", authServer.SetInvitePassword)
+	mux.HandleFunc("/auth/invite/verify", authServer.VerifyInviteEmail)
 
 	mux.HandleFunc("/auth/verify-email", authServer.VerifyEmail)
 	mux.HandleFunc("/auth/forgot-password", authServer.ForgotPassword)

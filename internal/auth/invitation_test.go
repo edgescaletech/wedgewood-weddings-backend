@@ -52,17 +52,19 @@ func TestInvitationLoginRequiresExactAcceptedIdentity(t *testing.T) {
 			if scenario.hasPending {
 				pending.AddRow("local", "inv_1")
 			}
-			mock.ExpectQuery("SELECT id,workos_invitation_id").WithArgs(email).WillReturnRows(pending)
+			mock.ExpectQuery("SELECT u.id,u.workos_invitation_id").WithArgs(email, subject).WillReturnRows(pending)
 			if scenario.status == 204 {
 				mock.ExpectBegin()
 				mock.ExpectExec("UPDATE users SET workos_id").WithArgs(subject, email, "local", "inv_1").WillReturnResult(sqlmock.NewResult(0, 1))
 				mock.ExpectExec("INSERT INTO audit_logs").WithArgs("local", "inv_1").WillReturnResult(sqlmock.NewResult(0, 1))
+				mock.ExpectExec("DELETE FROM invitation_onboarding").WithArgs("inv_1", "local").WillReturnResult(sqlmock.NewResult(0, 1))
 				mock.ExpectExec("INSERT INTO auth_sessions").WillReturnResult(sqlmock.NewResult(0, 1))
 				mock.ExpectCommit()
 			}
+			method := workos.AuthenticateResponseAuthenticationMethodPassword
 			response := httptest.NewRecorder()
 			server.createSession(response, httptest.NewRequest(http.MethodPost, "/auth/password", nil), &workos.AuthenticateResponse{
-				User: &workos.User{ID: subject, Email: email, EmailVerified: true}, AccessToken: "access", RefreshToken: "refresh",
+				AuthenticationMethod: &method, User: &workos.User{ID: subject, Email: email, EmailVerified: true}, AccessToken: "access", RefreshToken: "refresh",
 			}, true)
 			if response.Code != scenario.status {
 				t.Fatalf("status=%d body=%s", response.Code, response.Body)
