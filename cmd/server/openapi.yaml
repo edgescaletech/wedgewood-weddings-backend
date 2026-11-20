@@ -9,6 +9,139 @@ paths:
       summary: Health check
       responses:
         '200': {description: Healthy}
+  /docs:
+    get:
+      summary: View API documentation
+      responses:
+        '200': {description: HTML API documentation}
+  /openapi.yaml:
+    get:
+      summary: Download this OpenAPI specification
+      responses:
+        '200': {description: OpenAPI YAML document}
+  /api/labor-goals/summary:
+    get:
+      summary: Get the weekly and monthly Labor summary
+      description: Requires an active session. Venue-specific authorization is not yet enforced.
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: venueId, in: query, schema: {type: string}, description: Salesforce venue ID}
+        - {name: week, in: query, schema: {type: string, format: date}, description: Planning week anchor. Defaults to the current date.}
+      responses:
+        '200':
+          description: Labor plans for the week and accounting month
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LaborGoalsSummary'}
+        '401': {description: Authentication required}
+        '403': {description: Account inactive}
+        '500': {description: Could not build the summary}
+  /api/labor-goals/targets:
+    get:
+      summary: List Labor targets for a venue and year
+      description: Requires an active session. Venue-specific authorization is not yet enforced.
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: venueId, in: query, schema: {type: string}, description: Salesforce venue ID}
+        - {name: year, in: query, schema: {type: integer, default: 2026}}
+      responses:
+        '200':
+          description: Labor targets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  venueId: {type: string}
+                  year: {type: integer}
+                  targets:
+                    type: array
+                    items: {$ref: '#/components/schemas/LaborEfficiencyTarget'}
+        '401': {description: Authentication required}
+        '403': {description: Account inactive}
+        '500': {description: Could not load targets}
+  /api/labor-goals/periods:
+    get:
+      summary: List accounting periods for a year
+      description: Requires an active session.
+      security: [{SessionCookie: []}]
+      parameters:
+        - {name: year, in: query, schema: {type: integer, default: 2026}}
+      responses:
+        '200':
+          description: Accounting periods
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  year: {type: integer}
+                  periods:
+                    type: array
+                    items: {$ref: '#/components/schemas/AccountingPeriod'}
+        '401': {description: Authentication required}
+        '403': {description: Account inactive}
+        '500': {description: Could not load periods}
+  /api/admin/labor-goals/upload:
+    post:
+      summary: Import Labor targets (labor_goals.manage)
+      description: Upserts targets from CSV. Rows identify a venue by name or number and include month, FOH, and BOH columns.
+      security: [{SessionCookie: []}]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+          application/json:
+            schema:
+              type: object
+              properties:
+                csv: {type: string}
+          text/csv:
+            schema: {type: string}
+      responses:
+        '200':
+          description: Import results and row warnings
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CsvUploadResult'}
+        '400': {description: Invalid upload or CSV}
+        '401': {description: Authentication required}
+        '403': {description: Account inactive or permission denied}
+  /api/admin/accounting-periods/upload:
+    post:
+      summary: Import accounting periods (labor_goals.manage)
+      description: Upserts accounting periods from CSV.
+      security: [{SessionCookie: []}]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+          application/json:
+            schema:
+              type: object
+              properties:
+                csv: {type: string}
+          text/csv:
+            schema: {type: string}
+      responses:
+        '200':
+          description: Import results and row warnings
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CsvUploadResult'}
+        '400': {description: Invalid upload or CSV}
+        '401': {description: Authentication required}
+        '403': {description: Account inactive or permission denied}
   /api/admin/users:
     get:
       summary: List local users (users.view)
@@ -180,28 +313,6 @@ paths:
       security: [{SessionCookie: []}]
       responses:
         '200': {description: Role list}
-  /api/admin/roles/{id}:
-    get:
-      summary: Get a predefined role and permissions (roles.view)
-      security: [{SessionCookie: []}]
-      parameters:
-        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
-      responses:
-        '200': {description: Role details}
-  /api/admin/roles/{id}/permissions:
-    get:
-      summary: Get permissions for a role (roles.view)
-      security: [{SessionCookie: []}]
-      parameters:
-        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
-      responses:
-        '200': {description: Role and permissions}
-  /api/admin/permissions:
-    get:
-      summary: List permission definitions (roles.view)
-      security: [{SessionCookie: []}]
-      responses:
-        '200': {description: Permission list}
   /api/admin/venues:
     get:
       summary: List venues (venues.manage_access)
@@ -597,7 +708,6 @@ paths:
       parameters:
         - {name: week, in: query, schema: {type: string, format: date}}
         - {name: venueId, in: query, schema: {type: string}}
-        - {name: refresh, in: query, schema: {type: boolean}}
       responses:
         '200':
           description: Weekly events
@@ -649,6 +759,67 @@ components:
   securitySchemes:
     SessionCookie: {type: apiKey, in: cookie, name: session}
   schemas:
+    CsvUploadResult:
+      type: object
+      properties:
+        imported: {type: integer}
+        updated: {type: integer}
+        skipped: {type: integer}
+        errors:
+          type: array
+          nullable: true
+          items: {type: string}
+    AccountingPeriod:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        year: {type: integer}
+        periodNumber: {type: integer}
+        periodKey: {type: string}
+        monthName: {type: string}
+        startDate: {type: string, format: date}
+        endDate: {type: string, format: date}
+        weeksCount: {type: integer}
+        daysCount: {type: integer}
+        createdAt: {type: string, format: date-time}
+    LaborEfficiencyTarget:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        venueId: {type: string}
+        venueNumber: {type: string}
+        year: {type: integer}
+        periodKey: {type: string}
+        basis: {type: string}
+        fohTarget: {type: number, nullable: true}
+        bohTarget: {type: number, nullable: true}
+    DepartmentMetric:
+      type: object
+      properties:
+        targetLe: {type: number}
+        currentLe: {type: number}
+        budgetHours: {type: number}
+        scheduledHours: {type: number}
+        remainingHours: {type: number}
+        totalGuests: {type: integer}
+        totalEvents: {type: integer}
+        eventsWithStaffing: {type: integer}
+    PeriodLaborPlan:
+      type: object
+      properties:
+        label: {type: string}
+        dates: {type: string}
+        foh: {$ref: '#/components/schemas/DepartmentMetric'}
+        boh: {$ref: '#/components/schemas/DepartmentMetric'}
+    LaborGoalsSummary:
+      type: object
+      properties:
+        venueId: {type: string}
+        venueName: {type: string}
+        weekPlan: {$ref: '#/components/schemas/PeriodLaborPlan'}
+        monthPlan: {$ref: '#/components/schemas/PeriodLaborPlan'}
+        periodKey: {type: string}
+        hasLiveGoal: {type: boolean}
     AccessGrants:
       type: object
       required: [roles, permissions]

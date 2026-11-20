@@ -187,7 +187,7 @@ Invited users become active after completing invitation setup. An authorized Adm
 | `GET /docs` | Swagger UI | Public |
 | `GET /openapi.yaml` | API specification | Public |
 
-For events, the optional `venueId` query parameter filters results and `refresh=true` requests fresh data from Salesforce. The `week` date identifies a week; results cover Monday through Sunday.
+For events, the optional `venueId` query parameter filters results. The `week` date identifies a week; results cover Monday through Sunday.
 
 ## Sessions and access
 

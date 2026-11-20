@@ -27,11 +27,18 @@ func TestAdminRoutesRequireAuthentication(t *testing.T) {
 	mux := http.NewServeMux()
 	server := &Server{DB: db, Auth: authServer, Access: &authorization.Service{DB: db}}
 	server.Register(mux)
-	for _, path := range []string{"/api/admin/users", "/api/admin/roles", "/api/admin/permissions", "/api/admin/venues"} {
+	for _, path := range []string{"/api/admin/users", "/api/admin/roles", "/api/admin/venues"} {
 		response := httptest.NewRecorder()
 		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 		if response.Code != http.StatusUnauthorized {
 			t.Errorf("%s: got %d, want 401", path, response.Code)
+		}
+	}
+	for _, path := range []string{"/api/admin/roles/00000000-0000-4000-8000-000000000001", "/api/admin/permissions"} {
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusNotFound {
+			t.Errorf("%s: got %d, want 404", path, response.Code)
 		}
 	}
 	for _, endpoint := range []struct{ method, path string }{

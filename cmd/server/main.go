@@ -156,25 +156,17 @@ func eventsHandler(db *sql.DB, sf *salesforce.Client, syncWorker *jobs.EventSync
 
 		cacheKey := start.Format("2006-01-02")
 		venueIdParam := r.URL.Query().Get("venueId")
-		isRefresh := r.URL.Query().Get("refresh") == "true"
 
 		// 1. Try serving from PostgreSQL first (sub-5ms)
 		if db != nil {
 			dbEvents, err := repositories.GetEventsByWeek(r.Context(), db, start, end, venueIdParam)
 			if err == nil && len(dbEvents) > 0 {
-				// If refresh requested, kick off non-blocking background sync without freezing the UI
-				if isRefresh && syncWorker != nil {
-					syncWorker.SyncWeekAsync(start, end)
-				}
 				log.Printf("[DB HIT] Served %d events for week %s (venueId=%q) in ~2ms", len(dbEvents), cacheKey, venueIdParam)
 				resp := map[string]any{
 					"weekStart": cacheKey,
 					"weekEnd":   end.Format("2006-01-02"),
 					"events":    dbEvents,
 					"source":    "database",
-				}
-				if isRefresh {
-					resp["syncStatus"] = "syncing_in_background"
 				}
 				writeJSON(w, http.StatusOK, resp)
 				return
