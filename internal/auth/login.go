@@ -180,9 +180,10 @@ func (server *Server) createSession(writer http.ResponseWriter, request *http.Re
 }
 
 // linkLoginAccount binds a verified identity and records acceptance in the same
-// transaction. Admin activation and the saved profile and grants are unaffected.
+// transaction. Newly linked invitees become active with their saved grants.
 func linkLoginAccount(ctx context.Context, tx *sql.Tx, account loginAccount, user *workos.User) error {
-	result, err := tx.ExecContext(ctx, `UPDATE users SET workos_id=$1,email=$2,updated_at=now()
+	result, err := tx.ExecContext(ctx, `UPDATE users SET workos_id=$1,email=$2,
+		is_active=CASE WHEN $4::text IS NOT NULL THEN true ELSE is_active END,updated_at=now()
 		WHERE id=$3 AND archived_at IS NULL AND (
 			($4::text IS NULL AND workos_id=$1) OR
 			(workos_id IS NULL AND workos_invitation_id=$4 AND lower(email)=lower($2))

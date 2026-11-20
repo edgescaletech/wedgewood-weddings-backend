@@ -382,7 +382,7 @@ func TestInvitationOnboardingPostgres(t *testing.T) {
 				Scan(&id, &displayName, &active, &sessions, &onboarding); err != nil {
 				t.Fatal(err)
 			}
-			if id != inviteUser || displayName != "Admin-entered Name" || active || sessions != 0 || onboarding != 0 {
+			if id != inviteUser || displayName != "Admin-entered Name" || !active || sessions != 0 || onboarding != 0 {
 				t.Fatalf("unexpected linked account: %s %s active=%t sessions=%d onboarding=%d", id, displayName, active, sessions, onboarding)
 			}
 		})

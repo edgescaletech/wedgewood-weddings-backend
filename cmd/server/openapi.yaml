@@ -63,7 +63,7 @@ paths:
         '403': {description: Permission denied}
     post:
       summary: Invite a user (users.manage)
-      description: Requires matching Origin. Initial roles also require roles.assign and venue grants require venues.manage_access. Assign at most one role per venue. WorkOS sends an application invitation. The local account stays inactive until WorkOS confirms acceptance and an Admin activates it.
+      description: Requires matching Origin. Initial roles also require roles.assign and venue grants require venues.manage_access. Assign at most one role per venue. WorkOS sends an application invitation. The local account is activated when invitation setup completes.
       security: [{SessionCookie: []}]
       parameters:
         - {name: Idempotency-Key, in: header, required: true, schema: {type: string, format: uuid}}
@@ -435,7 +435,7 @@ paths:
   /auth/invite/password:
     post:
       summary: Set the verified invitee's first password
-      description: Requires a matching Origin and an active onboarding cookie. The server selects the WorkOS user from the session. Success links the inactive local account and consumes the cookie without creating an application session.
+      description: Requires a matching Origin and an active onboarding cookie. The server selects the WorkOS user from the session. Success links and activates the local account and consumes the cookie without creating an application session.
       requestBody:
         required: true
         content:
@@ -449,7 +449,7 @@ paths:
                 password: {type: string, format: password}
                 confirmPassword: {type: string, format: password}
       responses:
-        '204': {description: Password set and inactive local account linked}
+        '204': {description: Password set and local account linked and activated}
         '400': {description: Invalid request or passwords do not match}
         '401': {description: Onboarding session missing, expired, or changed}
         '403': {description: Invalid origin}
