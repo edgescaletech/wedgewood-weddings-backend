@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"wedding-project/internal/auth"
@@ -138,8 +140,12 @@ func (server *Server) venues(writer http.ResponseWriter, request *http.Request) 
 		respond(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	server.queryJSON(writer, request, venueDirectoryQuery, limit, offset, search, active, directory)
-
+	region := strings.TrimSpace(request.URL.Query().Get("region"))
+	if utf8.RuneCountInString(region) > 100 {
+		respond(writer, http.StatusBadRequest, map[string]string{"error": "region too long"})
+		return
+	}
+	server.queryJSON(writer, request, venueDirectoryQuery, limit, offset, search, active, directory, region)
 }
 
 func (server *Server) venue(writer http.ResponseWriter, request *http.Request) {

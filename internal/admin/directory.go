@@ -110,13 +110,20 @@ SELECT CASE WHEN $9 THEN jsonb_build_object(
 ELSE COALESCE((SELECT jsonb_agg(to_jsonb(s) ORDER BY email, id) FROM summaries s), '[]'::jsonb) END`
 
 const venueDirectoryQuery = `
-WITH matches AS (
-    SELECT id, name, property_name, is_active FROM venues
-    WHERE position(lower($3) in lower(name)) > 0 AND ($4 = '' OR is_active = ($4 = 'true'))
+WITH available AS (
+    SELECT id, name, property_name, is_active, NULLIF(btrim(region), '') AS region
+    FROM venues WHERE $4 = '' OR is_active = ($4 = 'true')
+), matches AS (
+    SELECT * FROM available
+    WHERE position(lower($3) in lower(name)) > 0 AND ($6 = '' OR region = $6)
 ), page AS (
     SELECT * FROM matches ORDER BY name, id LIMIT $1 OFFSET $2
 ), items AS (
     SELECT COALESCE(jsonb_agg(to_jsonb(p) ORDER BY name, id), '[]'::jsonb) AS data FROM page p
 )
-SELECT CASE WHEN $5 THEN jsonb_build_object('items', data, 'total', (SELECT count(*) FROM matches))
+SELECT CASE WHEN $5 THEN jsonb_build_object(
+    'items', data,
+    'total', (SELECT count(*) FROM matches),
+    'regions', COALESCE((SELECT jsonb_agg(DISTINCT region ORDER BY region)
+                         FROM available WHERE region IS NOT NULL), '[]'::jsonb))
 ELSE data END FROM items`

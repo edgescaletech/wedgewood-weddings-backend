@@ -217,12 +217,13 @@ paths:
       security: [{SessionCookie: []}]
       parameters:
         - {name: search, in: query, schema: {type: string, maxLength: 255}, description: Case-insensitive venue name search.}
+        - {name: region, in: query, schema: {type: string, maxLength: 100}, description: Exact venue region as returned by the directory.}
         - {name: active, in: query, schema: {type: boolean}}
         - {name: view, in: query, schema: {type: string, enum: [directory]}}
         - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100}}
         - {name: offset, in: query, schema: {type: integer, minimum: 0}}
       responses:
-        '200': {description: 'Venue array by default. With view=directory, returns {items, total} for the filtered venues.'}
+        '200': {description: 'Venue array by default. With view=directory, returns {items, total, regions}. Regions are distinct nonblank options in the active filter scope, independent of name search, region filter, and pagination.'}
         '400': {description: Invalid filters or pagination}
   /api/admin/venues/{id}:
     get:

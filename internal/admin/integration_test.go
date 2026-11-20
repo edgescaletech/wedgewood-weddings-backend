@@ -195,6 +195,37 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 		return callWithKey(method, path, body, uuid.NewString())
 	}
 
+	t.Run("venue directory region filter", func(t *testing.T) {
+		if _, err := db.Exec(`INSERT INTO venues(id,name,region,is_active) VALUES
+			('region-test-a','Oak Grove','Bay Area',true),
+			('region-test-b','Oak House','Bay Area',true),
+			('region-test-c','Oak Hall','Southern California',true),
+			('region-test-d','Oak Estate','Inactive Region',false),
+			('region-test-e','Pine House','Bay Area',true)`); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if _, err := db.Exec(`DELETE FROM venues WHERE id LIKE 'region-test-%'`); err != nil {
+				t.Error(err)
+			}
+		})
+		result := call(http.MethodGet, "/api/admin/venues?view=directory&active=true&search=oak&region=Bay+Area&limit=1&offset=1", "")
+		var directory struct {
+			Items   []struct{ ID, Region string }
+			Total   int
+			Regions []string
+		}
+		if err := json.Unmarshal(result.Body.Bytes(), &directory); err != nil || result.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s err=%v", result.Code, result.Body, err)
+		}
+		if directory.Total != 2 || len(directory.Items) != 1 || directory.Items[0].ID != "region-test-b" || directory.Items[0].Region != "Bay Area" {
+			t.Fatalf("unexpected filtered page: %s", result.Body)
+		}
+		if strings.Join(directory.Regions, ",") != "Bay Area,Southern California" {
+			t.Fatalf("unexpected region options: %v", directory.Regions)
+		}
+	})
+
 	// UUID text casing must not bypass self-modification protection.
 	response = call(http.MethodPost, "/api/admin/users/"+strings.ToUpper(ids[0])+"/roles", `{"roleId":"00000000-0000-4000-8000-000000000003","venueId":"venue-test"}`)
 	if response.Code != http.StatusForbidden {
