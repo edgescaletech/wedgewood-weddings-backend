@@ -35,6 +35,8 @@ type inviteAcceptanceMock struct {
 	sendCalls        int
 	passwordCalls    atomic.Int32
 	passwordError    error
+	sendError        error
+	cancelLookup     context.CancelFunc
 	verifyError      error
 	wrongEmail       bool
 	wrongAcceptedID  bool
@@ -49,7 +51,11 @@ func (p *inviteAcceptanceMock) FindInvite(_ context.Context, token string) (*wor
 	return p.GetInvitation(context.Background(), p.invite.ID)
 }
 
-func (p *inviteAcceptanceMock) GetInvitation(_ context.Context, id string) (*workos.UserInvite, error) {
+func (p *inviteAcceptanceMock) GetInvitation(ctx context.Context, id string) (*workos.UserInvite, error) {
+	if p.cancelLookup != nil {
+		p.cancelLookup()
+		return nil, ctx.Err()
+	}
 	if id != inviteID {
 		return nil, errors.New("wrong invitation")
 	}
@@ -70,7 +76,7 @@ func (p *inviteAcceptanceMock) SendInviteCode(_ context.Context, email string, t
 		return errors.New("wrong verification target")
 	}
 	p.sendCalls++
-	return nil
+	return p.sendError
 }
 
 func (p *inviteAcceptanceMock) VerifyInviteCode(_ context.Context, email, code string, token *string) (*workos.AuthenticateResponse, error) {
@@ -146,7 +152,7 @@ func TestInviteRejectsInvalidInputBeforeAccessingDependencies(t *testing.T) {
 
 func TestInvitationOnboardingPostgres(t *testing.T) {
 	db := onboardingDB(t)
-	for _, scenario := range []string{"complete", "revoked", "expired", "already accepted", "wrong email", "wrong user", "preexisting user", "provider code expired", "update rejected", "update uncertain", "session expired", "local verification failure", "local finalization failure", "concurrent"} {
+	for _, scenario := range []string{"complete", "revoked", "expired", "already accepted", "wrong email", "wrong user", "preexisting user", "provider code expired", "send rejected", "password lookup timed out", "update rejected", "update uncertain", "session expired", "accepted link expired", "local verification failure", "local finalization failure", "concurrent"} {
 		t.Run(scenario, func(t *testing.T) {
 			if _, err := db.Exec("DELETE FROM invitation_onboarding; DELETE FROM auth_sessions; DELETE FROM users"); err != nil {
 				t.Fatal(err)
@@ -214,6 +220,21 @@ func TestInvitationOnboardingPostgres(t *testing.T) {
 			if !strings.Contains(details.Body.String(), "Admin-entered Name") || strings.Contains(details.Body.String(), inviteToken) {
 				t.Fatalf("unexpected profile: %s", details.Body)
 			}
+			if scenario == "send rejected" {
+				provider.sendError = &workos.APIError{StatusCode: 429}
+				call(server.SendInviteCode, `{}`, 429)
+				provider.sendError = nil
+				call(server.SendInviteCode, `{}`, 429)
+				if provider.sendCalls != 1 {
+					t.Fatal("provider rejection bypassed the local cooldown")
+				}
+				if refreshed := call(server.InviteDetails, `{}`, 200); !strings.Contains(refreshed.Body.String(), `"step":"details"`) {
+					t.Fatal("failed send appeared as a delivered code")
+				}
+				call(server.VerifyInviteEmail, `{"code":"123456"}`, 400)
+				exec("UPDATE invitation_onboarding SET code_requested_at=now()-interval '61 seconds'")
+				provider.sendCalls = 0
+			}
 			call(server.SendInviteCode, `{}`, 204)
 			call(server.SendInviteCode, `{}`, 429)
 			if refreshed := call(server.InviteDetails, `{}`, 200); !strings.Contains(refreshed.Body.String(), `"step":"verify"`) {
@@ -244,7 +265,7 @@ func TestInvitationOnboardingPostgres(t *testing.T) {
 				exec("ALTER TABLE invitation_onboarding ADD CONSTRAINT test_verify_failure CHECK (workos_id IS NULL)")
 				call(server.VerifyInviteEmail, `{"code":"123456"}`, 503)
 				exec("ALTER TABLE invitation_onboarding DROP CONSTRAINT test_verify_failure")
-				exec("UPDATE invitation_onboarding SET code_sent_at=now()-interval '61 seconds'")
+				exec("UPDATE invitation_onboarding SET code_requested_at=now()-interval '61 seconds'")
 				call(server.SendInviteCode, `{}`, 204)
 			}
 			call(server.VerifyInviteEmail, `{"code":"123456"}`, 204)
@@ -255,11 +276,31 @@ func TestInvitationOnboardingPostgres(t *testing.T) {
 			if !strings.Contains(refreshed.Body.String(), `"step":"password"`) {
 				t.Fatal("refresh did not restore verified step")
 			}
-			if scenario == "session expired" {
-				exec("UPDATE invitation_onboarding SET expires_at=now()-interval '1 second',code_sent_at=now()-interval '61 seconds'")
+			if scenario == "session expired" || scenario == "accepted link expired" {
+				exec("UPDATE invitation_onboarding SET expires_at=now()-interval '1 second',code_requested_at=now()-interval '11 minutes',code_sent_at=now()-interval '11 minutes'")
+				if scenario == "accepted link expired" {
+					provider.invite.ExpiresAt = time.Now().Add(-time.Minute).Format(time.RFC3339)
+					delete(cookies, inviteTokenCookie)
+					if refreshed := call(server.InviteDetails, `{"token":"`+inviteToken+`"}`, 200); !strings.Contains(refreshed.Body.String(), `"step":"details"`) {
+						t.Fatal("accepted invitation did not resume after the link expired")
+					}
+				}
 				call(server.SetInvitePassword, invitePasswordRequest, 401)
 				call(server.SendInviteCode, `{}`, 204)
 				call(server.VerifyInviteEmail, `{"code":"123456"}`, 204)
+			}
+			if scenario == "password lookup timed out" {
+				ctx, cancel := context.WithCancel(context.Background())
+				provider.cancelLookup = cancel
+				req := inviteRequest("/auth/invite/password", invitePasswordRequest).WithContext(ctx)
+				req.AddCookie(cookies[inviteSessionCookie])
+				writer := httptest.NewRecorder()
+				server.SetInvitePassword(writer, req)
+				cancel()
+				if writer.Code != 503 || provider.passwordCalls.Load() != 0 {
+					t.Fatalf("canceled lookup returned %d and made %d password updates", writer.Code, provider.passwordCalls.Load())
+				}
+				provider.cancelLookup = nil
 			}
 			if scenario == "update rejected" {
 				provider.passwordError = &workos.APIError{StatusCode: 422}

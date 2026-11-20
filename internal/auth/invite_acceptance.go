@@ -38,6 +38,7 @@ type inviteAcceptanceProvider interface {
 
 type pendingInvite struct {
 	LocalID               string
+	WorkOSID              string
 	Email                 string
 	DisplayName           string
 	Provider              *workos.UserInvite
@@ -136,18 +137,20 @@ func (server *Server) SendInviteCode(writer http.ResponseWriter, request *http.R
 		writeInviteError(writer, err)
 		return
 	}
-	result, err := server.database.ExecContext(ctx, `INSERT INTO invitation_onboarding (invitation_id,user_id,code_sent_at)
+	var requestedAt time.Time
+	err = server.database.QueryRowContext(ctx, `INSERT INTO invitation_onboarding (invitation_id,user_id,code_requested_at)
 		SELECT workos_invitation_id,id,now() FROM users WHERE id=$1 AND workos_invitation_id=$2
 			AND workos_id IS NULL AND archived_at IS NULL AND NOT is_active
-		ON CONFLICT (invitation_id) DO UPDATE SET code_sent_at=now()
+		ON CONFLICT (invitation_id) DO UPDATE SET code_requested_at=now()
 		WHERE invitation_onboarding.password_started_at IS NULL
-			AND invitation_onboarding.code_sent_at <= now()-interval '60 seconds'`, target.LocalID, target.Provider.ID)
-	if err != nil {
-		writeInviteError(writer, err)
+			AND invitation_onboarding.code_requested_at <= now()-interval '60 seconds'
+		RETURNING code_requested_at`, target.LocalID, target.Provider.ID).Scan(&requestedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		inviteRateLimited(writer)
 		return
 	}
-	if count, _ := result.RowsAffected(); count != 1 {
-		inviteRateLimited(writer)
+	if err != nil {
+		writeInviteError(writer, err)
 		return
 	}
 	provider := server.provider.(inviteAcceptanceProvider)
@@ -157,6 +160,11 @@ func (server *Server) SendInviteCode(writer http.ResponseWriter, request *http.R
 		return
 	}
 	if err != nil {
+		writeInviteError(writer, err)
+		return
+	}
+	if _, err := server.database.ExecContext(ctx, `UPDATE invitation_onboarding SET code_sent_at=now()
+		WHERE invitation_id=$1 AND user_id=$2 AND code_requested_at=$3`, target.Provider.ID, target.LocalID, requestedAt); err != nil {
 		writeInviteError(writer, err)
 		return
 	}
@@ -295,13 +303,13 @@ func (server *Server) pendingInvitation(ctx context.Context, token string) (pend
 	if invite == nil || invite.ID == "" || invite.Email == "" || invite.OrganizationID != nil {
 		return target, errInvalidInvite
 	}
-	var linked, started, codeRequested bool
+	var linked, started, codeDelivered bool
 	err = server.database.QueryRowContext(ctx, `SELECT u.id,u.email,u.display_name,
-		(u.workos_id IS NOT NULL OR u.is_active),o.password_started_at IS NOT NULL,o.invitation_id IS NOT NULL,
+		(u.workos_id IS NOT NULL OR u.is_active),o.password_started_at IS NOT NULL,o.code_sent_at IS NOT NULL,
 		COALESCE(o.code_sent_at>now()-interval '10 minutes',false)
 		FROM users u LEFT JOIN invitation_onboarding o ON o.invitation_id=u.workos_invitation_id AND o.user_id=u.id
 		WHERE u.workos_invitation_id=$1 AND u.archived_at IS NULL`, invite.ID).
-		Scan(&target.LocalID, &target.Email, &target.DisplayName, &linked, &started, &codeRequested, &target.CodeRecentlyRequested)
+		Scan(&target.LocalID, &target.Email, &target.DisplayName, &linked, &started, &codeDelivered, &target.CodeRecentlyRequested)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && !strings.EqualFold(target.Email, invite.Email)) {
 		return target, errInvalidInvite
 	}
@@ -315,9 +323,12 @@ func (server *Server) pendingInvitation(ctx context.Context, token string) (pend
 	case "expired":
 		return target, errExpiredInvite
 	case "accepted":
-		if linked || started || !codeRequested || invite.AcceptedUserID == nil {
+		if linked || started || !codeDelivered || invite.AcceptedUserID == nil {
 			return target, errAcceptedInvite
 		}
+		// Redemption already succeeded. Recovery requires a fresh WorkOS code
+		// and proof of the same accepted identity, even after the link expires.
+		return target, nil
 	case "pending":
 		if linked || started {
 			return target, errInvalidInvite

@@ -1,7 +1,8 @@
 CREATE TABLE invitation_onboarding (
     invitation_id TEXT PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    code_sent_at TIMESTAMPTZ NOT NULL,
+    code_requested_at TIMESTAMPTZ NOT NULL,
+    code_sent_at TIMESTAMPTZ,
     workos_id TEXT,
     session_hash BYTEA UNIQUE,
     expires_at TIMESTAMPTZ,
