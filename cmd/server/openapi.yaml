@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Wedgewood Weddings API
   version: 1.0.0
-  description: AuthKit authentication prototype. Active users currently have access to all venues.
+  description: AuthKit authentication and venue-scoped access control.
 paths:
   /healthz:
     get:
@@ -22,10 +22,10 @@ paths:
   /api/labor-goals/summary:
     get:
       summary: Get the weekly and monthly Labor summary
-      description: Requires an active session. Venue-specific authorization is not yet enforced.
+      description: Requires labor_goals.view for the requested active venue.
       security: [{SessionCookie: []}]
       parameters:
-        - {name: venueId, in: query, schema: {type: string}, description: Salesforce venue ID}
+        - {name: venueId, in: query, required: true, schema: {type: string}, description: Salesforce venue ID}
         - {name: week, in: query, schema: {type: string, format: date}, description: Planning week anchor. Defaults to the current date.}
       responses:
         '200':
@@ -33,16 +33,17 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/LaborGoalsSummary'}
+        '400': {description: venueId is required}
         '401': {description: Authentication required}
-        '403': {description: Account inactive}
+        '403': {description: Account inactive or venue access denied}
         '500': {description: Could not build the summary}
   /api/labor-goals/targets:
     get:
       summary: List Labor targets for a venue and year
-      description: Requires an active session. Venue-specific authorization is not yet enforced.
+      description: Requires labor_goals.view for the requested active venue.
       security: [{SessionCookie: []}]
       parameters:
-        - {name: venueId, in: query, schema: {type: string}, description: Salesforce venue ID}
+        - {name: venueId, in: query, required: true, schema: {type: string}, description: Salesforce venue ID}
         - {name: year, in: query, schema: {type: integer, default: 2026}}
       responses:
         '200':
@@ -57,8 +58,9 @@ paths:
                   targets:
                     type: array
                     items: {$ref: '#/components/schemas/LaborEfficiencyTarget'}
+        '400': {description: venueId is required}
         '401': {description: Authentication required}
-        '403': {description: Account inactive}
+        '403': {description: Account inactive or venue access denied}
         '500': {description: Could not load targets}
   /api/labor-goals/periods:
     get:
@@ -704,6 +706,7 @@ paths:
   /api/events:
     get:
       summary: List weekly Salesforce events
+      description: Returns only events at active venues where the user has schedules.view. Supplying venueId requires access to that venue.
       security: [{SessionCookie: []}]
       parameters:
         - {name: week, in: query, schema: {type: string, format: date}}
@@ -716,6 +719,7 @@ paths:
               schema: {$ref: '#/components/schemas/WeeklyEventsResponse'}
         '400': {description: Invalid week}
         '401': {description: Unauthenticated}
+        '403': {description: Account inactive or venue access denied}
   /api/sync/events:
     post:
       summary: Trigger asynchronous background sync of Salesforce events
@@ -741,7 +745,7 @@ paths:
   /api/events/{id}:
     get:
       summary: Get a wedding event by Salesforce ID
-      description: Loads from PostgreSQL with a fallback to Salesforce.
+      description: Loads from PostgreSQL with a fallback to Salesforce. Requires schedules.view at the event's active venue.
       security: [{SessionCookie: []}]
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}
@@ -753,7 +757,7 @@ paths:
               schema: {$ref: '#/components/schemas/WeddingEvent'}
         '400': {description: Missing event ID}
         '401': {description: Unauthenticated}
-        '403': {description: Inactive account}
+        '403': {description: Account inactive or venue access denied}
         '404': {description: Event not found}
 components:
   securitySchemes:

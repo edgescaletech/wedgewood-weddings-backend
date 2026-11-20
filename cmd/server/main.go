@@ -19,6 +19,7 @@ import (
 	"wedding-project/internal/auth"
 	"wedding-project/internal/database"
 	"wedding-project/internal/jobs"
+	"wedding-project/internal/models"
 	"wedding-project/internal/pubsub"
 	"wedding-project/internal/repositories"
 )
@@ -156,11 +157,26 @@ func eventsHandler(db *sql.DB, sf *salesforce.Client, syncWorker *jobs.EventSync
 
 		cacheKey := start.Format("2006-01-02")
 		venueIdParam := r.URL.Query().Get("venueId")
+		allowed := eventVenueAccess(r)
+		if allowed == nil || (venueIdParam != "" && !allowed[venueIdParam]) {
+			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		}
+		if len(allowed) == 0 {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"weekStart": cacheKey,
+				"weekEnd":   end.Format("2006-01-02"),
+				"events":    []models.Event{},
+				"source":    "database",
+			})
+			return
+		}
 
 		// 1. Try serving from PostgreSQL first (sub-5ms)
 		if db != nil {
 			dbEvents, err := repositories.GetEventsByWeek(r.Context(), db, start, end, venueIdParam)
 			if err == nil && len(dbEvents) > 0 {
+				dbEvents = filterEventsByVenue(allowed, dbEvents)
 				log.Printf("[DB HIT] Served %d events for week %s (venueId=%q) in ~2ms", len(dbEvents), cacheKey, venueIdParam)
 				resp := map[string]any{
 					"weekStart": cacheKey,
@@ -184,6 +200,7 @@ func eventsHandler(db *sql.DB, sf *salesforce.Client, syncWorker *jobs.EventSync
 			// Read back from DB for guaranteed consistency
 			dbEvents, err := repositories.GetEventsByWeek(r.Context(), db, start, end, venueIdParam)
 			if err == nil {
+				dbEvents = filterEventsByVenue(allowed, dbEvents)
 				writeJSON(w, http.StatusOK, map[string]any{
 					"weekStart": cacheKey,
 					"weekEnd":   end.Format("2006-01-02"),
@@ -202,15 +219,11 @@ func eventsHandler(db *sql.DB, sf *salesforce.Client, syncWorker *jobs.EventSync
 			return
 		}
 
-		outputEvents := events
-		if venueIdParam != "" {
-			filtered := make([]salesforce.Event, 0)
-			for _, e := range events {
-				if e.VenueID == venueIdParam {
-					filtered = append(filtered, e)
-				}
+		outputEvents := make([]salesforce.Event, 0, len(events))
+		for _, event := range events {
+			if (venueIdParam == "" || event.VenueID == venueIdParam) && allowed[event.VenueID] {
+				outputEvents = append(outputEvents, event)
 			}
-			outputEvents = filtered
 		}
 
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -262,11 +275,20 @@ func eventByIDHandler(db *sql.DB, sf *salesforce.Client) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "event id is required")
 			return
 		}
+		allowed := eventVenueAccess(r)
+		if len(allowed) == 0 {
+			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		}
 
 		// 1. Try reading directly from DB
 		if db != nil {
 			evt, err := repositories.GetEventByID(r.Context(), db, id)
 			if err == nil && evt != nil {
+				if !allowed[evt.VenueID] {
+					writeError(w, http.StatusForbidden, "permission denied")
+					return
+				}
 				log.Printf("[DB HIT] Single event %s served from database (<1ms)", id)
 				writeJSON(w, http.StatusOK, evt)
 				return
@@ -279,6 +301,10 @@ func eventByIDHandler(db *sql.DB, sf *salesforce.Client) http.HandlerFunc {
 		if err != nil {
 			log.Printf("ERROR GetEventByID(%s): %v", id, err)
 			writeError(w, http.StatusNotFound, fmt.Sprintf("event not found: %v", err))
+			return
+		}
+		if evt == nil || !allowed[evt.VenueID] {
+			writeError(w, http.StatusForbidden, "permission denied")
 			return
 		}
 

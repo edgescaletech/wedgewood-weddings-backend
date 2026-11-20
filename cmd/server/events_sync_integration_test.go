@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -60,9 +61,10 @@ func TestEventSyncAndCachedRequests(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := db.Exec(`INSERT INTO events(id,name,event_date,stage_name,guest_count,
+	if _, err := db.Exec(`INSERT INTO venues(id,name) VALUES('venue-1','Test venue');
+		INSERT INTO events(id,venue_id,name,event_date,stage_name,guest_count,
 		under_21_count,over_21_count,contract_signed,has_bar,photo_booth,photobooth_staffed)
-		VALUES('event-1','Cached event','2026-11-17','Booked',0,0,0,false,false,false,false)`); err != nil {
+		VALUES('event-1','venue-1','Cached event','2026-11-17','Booked',0,0,0,false,false,false,false)`); err != nil {
 		t.Fatal(err)
 	}
 	var calls atomic.Int32
@@ -79,10 +81,14 @@ func TestEventSyncAndCachedRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	worker := jobs.NewEventSyncWorker(db, client)
+	eventRequest := func(path string) *http.Request {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		return request.WithContext(context.WithValue(request.Context(), venueAccessKey{}, map[string]bool{"venue-1": true}))
+	}
 	handler := eventsHandler(db, client, worker)
 	for _, suffix := range []string{"", "&refresh=true"} {
 		response := httptest.NewRecorder()
-		handler(response, httptest.NewRequest(http.MethodGet, "/api/events?week=2026-11-16"+suffix, nil))
+		handler(response, eventRequest("/api/events?week=2026-11-16"+suffix))
 		var body map[string]any
 		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 			t.Fatal(err)
@@ -100,7 +106,7 @@ func TestEventSyncAndCachedRequests(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 	fallback := httptest.NewRecorder()
-	eventsHandler(nil, client, nil)(fallback, httptest.NewRequest(http.MethodGet, "/api/events?week=2026-11-16", nil))
+	eventsHandler(nil, client, nil)(fallback, eventRequest("/api/events?week=2026-11-16"))
 	if fallback.Code != http.StatusOK || !strings.Contains(fallback.Body.String(), `"source":"salesforce"`) {
 		t.Fatalf("Salesforce fallback: %d %s", fallback.Code, fallback.Body)
 	}
