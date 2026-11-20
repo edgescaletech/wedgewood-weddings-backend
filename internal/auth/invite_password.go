@@ -113,7 +113,7 @@ func (server *Server) SetInvitePassword(writer http.ResponseWriter, request *htt
 	updated, err := provider.SetInvitePassword(ctx, user.ID, input.Password)
 	if workOSStatus(err, 400, 422, 429) && server.releasePasswordAttempt(ctx, hash) {
 		if workOSStatus(err, 429) {
-			inviteRateLimited(writer)
+			inviteRateLimited(writer, 60)
 		} else {
 			fail(writer, http.StatusUnprocessableEntity, "WorkOS rejected this password. Choose a stronger password and try again.")
 		}

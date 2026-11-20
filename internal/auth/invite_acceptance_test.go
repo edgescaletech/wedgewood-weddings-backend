@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -232,13 +233,23 @@ func TestInvitationOnboardingPostgres(t *testing.T) {
 					t.Fatal("failed send appeared as a delivered code")
 				}
 				call(server.VerifyInviteEmail, `{"code":"123456"}`, 400)
-				exec("UPDATE invitation_onboarding SET code_requested_at=now()-interval '61 seconds'")
+				exec("UPDATE invitation_onboarding SET code_requested_at=now()-interval '31 seconds'")
 				provider.sendCalls = 0
 			}
-			call(server.SendInviteCode, `{}`, 204)
-			call(server.SendInviteCode, `{}`, 429)
-			if refreshed := call(server.InviteDetails, `{}`, 200); !strings.Contains(refreshed.Body.String(), `"step":"verify"`) {
-				t.Fatal("refresh did not restore code entry")
+			if sent := call(server.SendInviteCode, `{}`, 204); sent.Header().Get("Retry-After") != "30" {
+				t.Fatal("successful send did not return a 30-second cooldown")
+			}
+			exec("UPDATE invitation_onboarding SET code_requested_at=now()-interval '10 seconds'")
+			if limited := call(server.SendInviteCode, `{}`, 429); limited.Header().Get("Retry-After") != "20" {
+				t.Fatal("rate-limited send did not return the remaining wait")
+			}
+			var refreshedProfile struct {
+				Step              string
+				RetryAfterSeconds int
+			}
+			if err := json.Unmarshal(call(server.InviteDetails, `{}`, 200).Body.Bytes(), &refreshedProfile); err != nil ||
+				refreshedProfile.Step != "verify" || refreshedProfile.RetryAfterSeconds != 20 {
+				t.Fatalf("refresh did not restore code entry and cooldown: %+v (%v)", refreshedProfile, err)
 			}
 			if provider.sendCalls != 1 {
 				t.Fatal("cooldown did not prevent a duplicate email")
@@ -265,7 +276,7 @@ func TestInvitationOnboardingPostgres(t *testing.T) {
 				exec("ALTER TABLE invitation_onboarding ADD CONSTRAINT test_verify_failure CHECK (workos_id IS NULL)")
 				call(server.VerifyInviteEmail, `{"code":"123456"}`, 503)
 				exec("ALTER TABLE invitation_onboarding DROP CONSTRAINT test_verify_failure")
-				exec("UPDATE invitation_onboarding SET code_requested_at=now()-interval '61 seconds'")
+				exec("UPDATE invitation_onboarding SET code_requested_at=now()-interval '31 seconds'")
 				call(server.SendInviteCode, `{}`, 204)
 			}
 			call(server.VerifyInviteEmail, `{"code":"123456"}`, 204)

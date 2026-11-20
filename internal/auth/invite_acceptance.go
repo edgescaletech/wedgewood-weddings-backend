@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 const (
 	inviteTokenCookie   = "invite_context"
 	inviteSessionCookie = "invite_onboarding"
+	inviteResendSeconds = 30
 )
 
 var inviteCodeFormat = regexp.MustCompile(`^[0-9]{6}$`)
@@ -43,6 +45,7 @@ type pendingInvite struct {
 	DisplayName           string
 	Provider              *workos.UserInvite
 	CodeRecentlyRequested bool
+	RetryAfterSeconds     int
 }
 
 type inviteContext struct {
@@ -104,8 +107,9 @@ func (server *Server) InviteDetails(writer http.ResponseWriter, request *http.Re
 
 func writeInviteProfile(writer http.ResponseWriter, target pendingInvite, step string) {
 	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(map[string]string{
+	_ = json.NewEncoder(writer).Encode(map[string]any{
 		"email": target.Email, "displayName": target.DisplayName, "step": step, "invitationId": target.Provider.ID,
+		"retryAfterSeconds": target.RetryAfterSeconds,
 	})
 }
 
@@ -129,6 +133,7 @@ func (server *Server) SendInviteCode(writer http.ResponseWriter, request *http.R
 	if !server.decodeRecoveryRequest(writer, request, &input) {
 		return
 	}
+	writer.Header().Set("Access-Control-Expose-Headers", "Retry-After")
 	ctx, cancel := context.WithTimeout(request.Context(), 15*time.Second)
 	defer cancel()
 	token := server.invitationToken(request, "")
@@ -137,16 +142,20 @@ func (server *Server) SendInviteCode(writer http.ResponseWriter, request *http.R
 		writeInviteError(writer, err)
 		return
 	}
+	if target.RetryAfterSeconds > 0 {
+		inviteRateLimited(writer, target.RetryAfterSeconds)
+		return
+	}
 	var requestedAt time.Time
 	err = server.database.QueryRowContext(ctx, `INSERT INTO invitation_onboarding (invitation_id,user_id,code_requested_at)
 		SELECT workos_invitation_id,id,now() FROM users WHERE id=$1 AND workos_invitation_id=$2
 			AND workos_id IS NULL AND archived_at IS NULL AND NOT is_active
 		ON CONFLICT (invitation_id) DO UPDATE SET code_requested_at=now()
 		WHERE invitation_onboarding.password_started_at IS NULL
-			AND invitation_onboarding.code_requested_at <= now()-interval '60 seconds'
-		RETURNING code_requested_at`, target.LocalID, target.Provider.ID).Scan(&requestedAt)
+			AND invitation_onboarding.code_requested_at <= now()-($3 * interval '1 second')
+		RETURNING code_requested_at`, target.LocalID, target.Provider.ID, inviteResendSeconds).Scan(&requestedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		inviteRateLimited(writer)
+		inviteRateLimited(writer, inviteResendSeconds)
 		return
 	}
 	if err != nil {
@@ -154,9 +163,10 @@ func (server *Server) SendInviteCode(writer http.ResponseWriter, request *http.R
 		return
 	}
 	provider := server.provider.(inviteAcceptanceProvider)
+	writer.Header().Set("Retry-After", strconv.Itoa(inviteResendSeconds))
 	err = provider.SendInviteCode(ctx, target.Email, inviteMagicToken(target, token))
 	if workOSStatus(err, 429) {
-		inviteRateLimited(writer)
+		inviteRateLimited(writer, inviteResendSeconds)
 		return
 	}
 	if err != nil {
@@ -171,8 +181,8 @@ func (server *Server) SendInviteCode(writer http.ResponseWriter, request *http.R
 	writer.WriteHeader(http.StatusNoContent)
 }
 
-func inviteRateLimited(writer http.ResponseWriter) {
-	writer.Header().Set("Retry-After", "60")
+func inviteRateLimited(writer http.ResponseWriter, seconds int) {
+	writer.Header().Set("Retry-After", strconv.Itoa(seconds))
 	fail(writer, http.StatusTooManyRequests, "Wait before requesting another verification code.")
 }
 
@@ -219,7 +229,7 @@ func (server *Server) VerifyInviteEmail(writer http.ResponseWriter, request *htt
 	provider := server.provider.(inviteAcceptanceProvider)
 	response, err := provider.VerifyInviteCode(ctx, target.Email, input.Code, inviteMagicToken(target, token))
 	if workOSStatus(err, 429) {
-		inviteRateLimited(writer)
+		inviteRateLimited(writer, 60)
 		return
 	}
 	if workOSStatus(err, 400, 401, 422) {
@@ -306,10 +316,11 @@ func (server *Server) pendingInvitation(ctx context.Context, token string) (pend
 	var linked, started, codeDelivered bool
 	err = server.database.QueryRowContext(ctx, `SELECT u.id,u.email,u.display_name,
 		(u.workos_id IS NOT NULL OR u.is_active),o.password_started_at IS NOT NULL,o.code_sent_at IS NOT NULL,
-		COALESCE(o.code_sent_at>now()-interval '10 minutes',false)
+		COALESCE(o.code_sent_at>now()-interval '10 minutes',false),
+		GREATEST(0, CEIL(EXTRACT(EPOCH FROM o.code_requested_at-now()))+$2)::int
 		FROM users u LEFT JOIN invitation_onboarding o ON o.invitation_id=u.workos_invitation_id AND o.user_id=u.id
-		WHERE u.workos_invitation_id=$1 AND u.archived_at IS NULL`, invite.ID).
-		Scan(&target.LocalID, &target.Email, &target.DisplayName, &linked, &started, &codeDelivered, &target.CodeRecentlyRequested)
+		WHERE u.workos_invitation_id=$1 AND u.archived_at IS NULL`, invite.ID, inviteResendSeconds).
+		Scan(&target.LocalID, &target.Email, &target.DisplayName, &linked, &started, &codeDelivered, &target.CodeRecentlyRequested, &target.RetryAfterSeconds)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && !strings.EqualFold(target.Email, invite.Email)) {
 		return target, errInvalidInvite
 	}

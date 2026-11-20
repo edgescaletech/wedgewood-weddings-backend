@@ -367,12 +367,13 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [displayName, email, invitationId, step]
+                required: [displayName, email, invitationId, step, retryAfterSeconds]
                 properties:
                   displayName: {type: string}
                   email: {type: string, format: email}
                   invitationId: {type: string}
                   step: {type: string, enum: [details, verify, password]}
+                  retryAfterSeconds: {type: integer, minimum: 0, description: Seconds remaining before another code can be requested}
         '400': {description: Invalid request}
         '403': {description: Invalid origin}
         '404': {description: Invalid invitation or no eligible local account}
@@ -390,14 +391,22 @@ paths:
           application/json:
             schema: {type: object, additionalProperties: false}
       responses:
-        '204': {description: Verification requested}
+        '204':
+          description: Verification requested
+          headers:
+            Retry-After:
+              schema: {type: integer, example: 30}
         '400': {description: Invalid request}
         '403': {description: Invalid origin}
         '404': {description: Invalid invitation}
         '409': {description: Invitation already accepted or password setup already attempted}
         '410': {description: Expired or revoked invitation}
         '415': {description: Expected application/json}
-        '429': {description: Code resend cooldown or WorkOS rate limit}
+        '429':
+          description: Code resend cooldown or WorkOS rate limit
+          headers:
+            Retry-After:
+              schema: {type: integer, example: 30}
         '503': {description: Verification temporarily unavailable}
   /auth/invite/verify:
     post:
