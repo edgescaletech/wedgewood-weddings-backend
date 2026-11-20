@@ -69,7 +69,7 @@ func TestPermissionIntegration(t *testing.T) {
 	exec(`INSERT INTO users(id,workos_id,email,is_active) VALUES($1,'user_test','test@example.com',true)`, userID)
 	exec(`INSERT INTO venues(id,name,is_active) VALUES('venue-a','A',NULL),('venue-b','B',TRUE),('venue-c','C',TRUE),('closed','Closed',FALSE)`)
 	exec(`INSERT INTO events(id,venue_id,name,event_date) VALUES('historic','venue-a','Historic event',current_date)`)
-	apply("004_admin.up.sql", "005_user_admin.up.sql", "006_security_guards.up.sql")
+	apply("006_admin.up.sql", "007_user_admin.up.sql", "008_security_guards.up.sql")
 	registryID := func(externalID string) string {
 		t.Helper()
 		var id string

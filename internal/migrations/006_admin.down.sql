@@ -1,4 +1,4 @@
--- Drop audit history first so the migration 006 dependency blocks this rollback.
+-- Drop audit history first so the migration 008 dependency blocks this rollback.
 DROP TABLE IF EXISTS audit_logs;
 DROP TRIGGER IF EXISTS venue_rbac_resource ON venues;
 DROP FUNCTION IF EXISTS sync_venue_rbac_resource();

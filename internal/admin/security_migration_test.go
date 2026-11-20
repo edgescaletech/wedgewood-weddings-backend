@@ -65,7 +65,7 @@ func TestSecurityMigrationIntegration(t *testing.T) {
 	if version, dirty, err := runner.Version(); err != nil || version != 3 || dirty {
 		t.Fatalf("starting version=%d dirty=%v err=%v", version, dirty, err)
 	}
-	if err := runner.Migrate(6); err != nil {
+	if err := runner.Migrate(8); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO audit_logs(id,action) VALUES($1,'test.history')`, uuid.NewString()); err != nil {
@@ -75,7 +75,7 @@ func TestSecurityMigrationIntegration(t *testing.T) {
 		t.Fatal("security rollback unexpectedly succeeded")
 	}
 	version, dirty, err := runner.Version()
-	if err != nil || version != 5 || !dirty {
+	if err != nil || version != 7 || !dirty {
 		t.Fatalf("unexpected failed rollback state: %d %v %v", version, dirty, err)
 	}
 	// Reproduce documented recovery: inspect data first, then clear only the dirty
@@ -88,13 +88,13 @@ func TestSecurityMigrationIntegration(t *testing.T) {
 		}
 	}
 	assertHistory()
-	if err := runner.Force(6); err != nil {
+	if err := runner.Force(8); err != nil {
 		t.Fatal(err)
 	}
-	if err := runner.Migrate(6); !errors.Is(err, migrate.ErrNoChange) {
+	if err := runner.Migrate(8); !errors.Is(err, migrate.ErrNoChange) {
 		t.Fatalf("forward resume: %v", err)
 	}
-	historicalDown, err := os.ReadFile("../migrations/004_admin.down.sql")
+	historicalDown, err := os.ReadFile("../migrations/006_admin.down.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestSecurityMigrationIntegration(t *testing.T) {
 		t.Fatal("historical destructive rollback succeeded")
 	}
 	assertHistory()
-	if err := runner.Migrate(7); err != nil {
+	if err := runner.Migrate(9); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO users(id,workos_id,email,is_active)

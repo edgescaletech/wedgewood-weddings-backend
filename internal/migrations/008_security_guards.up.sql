@@ -1,4 +1,4 @@
--- Keep a dependency on audit history so the historical 004 down script
+-- Keep a dependency on audit history so the historical 006 down script
 -- cannot drop audit_logs without an explicit destructive CASCADE.
 CREATE VIEW security_history_rollback_guard AS
 SELECT id AS audit_id FROM audit_logs;
