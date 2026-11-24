@@ -31,7 +31,7 @@ func (server *Server) setUserStatus(writer http.ResponseWriter, request *http.Re
 		} else if err := requireEditableUser(ctx, tx, userID); err != nil {
 			return err
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE users SET is_active=$1,updated_at=now() WHERE id=$2 AND (NOT $1 OR workos_id IS NOT NULL)`, active, userID)
+		result, err := tx.ExecContext(ctx, `UPDATE users SET is_active=$1,updated_at=now() WHERE id=$2 AND workos_id IS NOT NULL`, active, userID)
 		if err != nil {
 			return err
 		}

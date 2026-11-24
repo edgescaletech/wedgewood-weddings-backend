@@ -329,6 +329,9 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	if response := call(http.MethodPost, "/api/admin/users/"+invitedID+"/activate", ""); response.Code != http.StatusNotFound {
 		t.Fatalf("unaccepted activation: %d", response.Code)
 	}
+	if response := call(http.MethodPost, "/api/admin/users/"+invitedID+"/deactivate", ""); response.Code != http.StatusNotFound {
+		t.Fatalf("unaccepted deactivation: %d %s", response.Code, response.Body)
+	}
 	resendPath := "/api/admin/users/" + invitedID + "/invitation/resend"
 	t.Run("lookup failures do not start the resend window", func(t *testing.T) {
 		key := uuid.NewString()

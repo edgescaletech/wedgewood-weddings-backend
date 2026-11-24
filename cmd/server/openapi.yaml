@@ -236,12 +236,13 @@ paths:
         '404': {description: Target missing or awaiting invitation acceptance}
   /api/admin/users/{id}/deactivate:
     post:
-      summary: Deactivate a user and remove local sessions (users.manage)
+      summary: Deactivate a linked user and remove local sessions (users.manage)
       security: [{SessionCookie: []}]
       parameters:
         - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
       responses:
         '204': {description: Deactivated}
+        '404': {description: Target missing or awaiting invitation acceptance}
         '409': {description: Last administrator protection or the account is already deactivated}
   /api/admin/users/{id}/roles:
     get:
