@@ -59,6 +59,8 @@ CREATE UNIQUE INDEX user_roles_global_unique ON user_roles(user_id, role_id) WHE
 CREATE UNIQUE INDEX user_roles_venue_unique ON user_roles(user_id, resource_id)
     WHERE assignment_type = 'venue';
 
+CREATE INDEX user_roles_user_idx ON user_roles(user_id);
+
 CREATE INDEX user_roles_resource_idx ON user_roles(resource_id);
 
 CREATE INDEX user_roles_role_idx ON user_roles(role_id, assignment_type);
