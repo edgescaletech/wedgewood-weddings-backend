@@ -1,13 +1,17 @@
 package auth
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
-	"github.com/google/uuid"
-	workos "github.com/workos/workos-go/v7"
+	"database/sql"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/lib/pq"
+	workos "github.com/workos/workos-go/v7"
 )
 
 // Login redirects the browser to AuthKit after storing the encrypted OAuth state.
@@ -92,6 +96,18 @@ func (server *Server) createSession(writer http.ResponseWriter, request *http.Re
 		return
 	}
 
+	// Resolve an existing account, or a pending invitation whose recipient
+	// WorkOS can prove is this exact authenticated subject.
+	account, err := server.loginAccount(request.Context(), response)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			fail(writer, http.StatusForbidden, "account unavailable; contact your administrator")
+		} else {
+			fail(writer, http.StatusServiceUnavailable, "authentication unavailable")
+		}
+		return
+	}
+
 	// Encrypt the WorkOS tokens before storing them in PostgreSQL.
 	sealed, err := workos.SealSessionFromAuthResponse(
 		response.AccessToken,
@@ -121,15 +137,20 @@ func (server *Server) createSession(writer http.ResponseWriter, request *http.Re
 	}
 
 	defer transaction.Rollback()
-	// Temporarily activate new users; the conflict update preserves existing status.
-	_, err = transaction.ExecContext(
-		request.Context(),
-		`INSERT INTO users (id,workos_id,email,is_active) VALUES ($1,$2,$3,TRUE)
-   ON CONFLICT (workos_id) DO UPDATE SET email=EXCLUDED.email, updated_at=now()`,
-		uuid.NewString(),
-		c.Subject,
-		response.User.Email,
-	)
+	// Bind the verified identity and current invitation atomically with session creation.
+	err = linkLoginAccount(request.Context(), transaction, account, response.User)
+	// A concurrent invitation or another linked identity may own this email.
+	// Roll back the identity update before issuing any session.
+	var ownershipError *pq.Error
+	if errors.As(err, &ownershipError) && ownershipError.Code == "23505" && ownershipError.Constraint == "users_email_owner" {
+		fail(writer, http.StatusConflict, "account email conflict; contact your administrator")
+		return
+	}
+
+	if errors.Is(err, sql.ErrNoRows) {
+		fail(writer, http.StatusForbidden, "account unavailable; contact your administrator")
+		return
+	}
 
 	if err == nil {
 		_, err = transaction.ExecContext(
@@ -154,5 +175,37 @@ func (server *Server) createSession(writer http.ResponseWriter, request *http.Re
 		writer.WriteHeader(http.StatusNoContent)
 		return
 	}
-	http.Redirect(writer, request, strings.TrimRight(server.config.AppURL, "/")+"/staffing/", http.StatusSeeOther)
+	http.Redirect(writer, request, strings.TrimRight(server.config.AppURL, "/")+"/login", http.StatusSeeOther)
+}
+
+// linkLoginAccount binds a verified identity and records acceptance in the same
+// transaction. Newly linked invitees become active with their saved grants.
+func linkLoginAccount(ctx context.Context, tx *sql.Tx, account loginAccount, user *workos.User) error {
+	result, err := tx.ExecContext(ctx, `UPDATE users SET workos_id=$1,email=$2,
+		is_active=CASE WHEN $4::text IS NOT NULL THEN true ELSE is_active END,updated_at=now()
+		WHERE id=$3 AND (
+			($4::text IS NULL AND workos_id=$1) OR
+			(workos_id IS NULL AND workos_invitation_id=$4 AND lower(email)=lower($2))
+		)`, user.ID, user.Email, account.id, account.invitationID)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return sql.ErrNoRows
+	}
+	if account.invitationID.Valid {
+		_, err = tx.ExecContext(ctx, `INSERT INTO audit_logs
+			(id,action,target_type,target_id,metadata) VALUES
+			(gen_random_uuid(),'user.invitation.accept','user',$1,jsonb_build_object('invitationId',$2::text))`,
+			account.id, account.invitationID)
+		if err == nil {
+			_, err = tx.ExecContext(ctx, `DELETE FROM invitation_onboarding WHERE invitation_id=$1 AND user_id=$2`,
+				account.invitationID, account.id)
+		}
+	}
+	return err
 }

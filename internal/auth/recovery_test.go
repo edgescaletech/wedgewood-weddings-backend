@@ -92,8 +92,9 @@ func TestVerifyEmailCompletesSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mock.ExpectQuery("SELECT id FROM users WHERE workos_id").WithArgs("user_1").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("local-user"))
 	mock.ExpectBegin()
-	mock.ExpectExec("INSERT INTO users").WithArgs(sqlmock.AnyArg(), "user_1", "person@example.com").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE users SET workos_id").WithArgs("user_1", "person@example.com", "local-user", nil).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO auth_sessions").WithArgs(sqlmock.AnyArg(), "user_1", sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	request := recoveryRequest("/auth/verify-email", `{"code":"123456"}`)

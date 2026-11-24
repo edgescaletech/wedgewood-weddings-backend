@@ -1,11 +1,18 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
+	"os"
+
+	workos "github.com/workos/workos-go/v7"
 
 	"wedding-project/internal/adapters/salesforce"
+	"wedding-project/internal/admin"
 	"wedding-project/internal/auth"
+	"wedding-project/internal/authorization"
+	"wedding-project/internal/currentuser"
 	"wedding-project/internal/jobs"
 )
 
@@ -32,14 +39,33 @@ func registerRoutes(
 	mux.Handle("/api/labor-goals/summary", authServer.Middleware(laborGoalsSummaryHandler(db)))
 	mux.Handle("/api/labor-goals/targets", authServer.Middleware(laborGoalsTargetsHandler(db)))
 	mux.Handle("/api/labor-goals/periods", authServer.Middleware(accountingPeriodsHandler(db)))
-	mux.Handle("/api/admin/labor-goals/upload", authServer.Middleware(laborGoalsUploadHandler(db)))
-	mux.Handle("/api/admin/accounting-periods/upload", authServer.Middleware(accountingPeriodsUploadHandler(db)))
+	access := &authorization.Service{DB: db}
+	requireLaborManage := func(next http.Handler) http.Handler {
+		return authServer.Middleware(access.HasPermissionMiddleware("labor_goals.manage", func(ctx context.Context) (string, bool) {
+			user, ok := auth.User(ctx)
+			return user.ID, ok
+		}, nil, next))
+	}
+	mux.Handle("/api/admin/labor-goals/upload", requireLaborManage(laborGoalsUploadHandler(db)))
+	mux.Handle("/api/admin/accounting-periods/upload", requireLaborManage(accountingPeriodsUploadHandler(db)))
 
-	// --- Auth routes (Kaif's) ---
+	adminServer := &admin.Server{
+		DB: db, Auth: authServer, Access: access, AppURL: os.Getenv("APP_URL"),
+		Identity: admin.WorkOSIdentityProvider{Client: workos.NewClient(os.Getenv("WORKOS_API_KEY"))},
+	}
+	adminServer.Register(mux)
+	currentuser.Register(mux, authServer, access)
+	registerAuthRoutes(mux, authServer)
+}
+
+func registerAuthRoutes(mux *http.ServeMux, authServer *auth.Server) {
 	mux.HandleFunc("/auth/login", authServer.Login)
 	mux.HandleFunc("/auth/password", authServer.PasswordLogin)
-	// Temporary signup endpoint; remove this route to disable account creation.
-	mux.Handle("/auth/signup", authServer.SignupRateLimit(http.HandlerFunc(authServer.Signup)))
+	mux.HandleFunc("/auth/invite", authServer.InviteDetails)
+	mux.HandleFunc("/auth/invite/send-code", authServer.SendInviteCode)
+	mux.HandleFunc("/auth/invite/password", authServer.SetInvitePassword)
+	mux.HandleFunc("/auth/invite/verify", authServer.VerifyInviteEmail)
+
 	mux.HandleFunc("/auth/verify-email", authServer.VerifyEmail)
 	mux.HandleFunc("/auth/forgot-password", authServer.ForgotPassword)
 	mux.HandleFunc("/auth/reset-password", authServer.ResetPassword)
