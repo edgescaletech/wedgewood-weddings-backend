@@ -160,11 +160,22 @@ func (server *Server) ResetPassword(writer http.ResponseWriter, request *http.Re
 	}
 	response, err := provider.ConfirmPasswordReset(request.Context(), input.Token, input.NewPassword)
 	if err != nil || response == nil || response.User == nil || response.User.ID == "" {
-		if isRecoveryUnavailable(err) {
-			fail(writer, http.StatusServiceUnavailable, "password reset temporarily unavailable")
+		if workOSStatus(err, http.StatusTooManyRequests) {
+			fail(writer, http.StatusTooManyRequests, "Too many reset attempts. Wait a moment and try again.")
 			return
 		}
-		fail(writer, http.StatusBadRequest, "password reset failed; check the link and password")
+		if message, invalidLink := workOSPasswordError(err, true); invalidLink {
+			fail(writer, http.StatusGone, message)
+			return
+		} else if message != "" {
+			fail(writer, http.StatusUnprocessableEntity, message)
+			return
+		}
+		if err == nil || isRecoveryUnavailable(err) || !workOSStatus(err, 400, 422) {
+			fail(writer, http.StatusServiceUnavailable, "Password reset is temporarily unavailable. Try again.")
+			return
+		}
+		fail(writer, http.StatusBadRequest, "WorkOS couldn’t reset your password. Try a different password or request a new reset link.")
 		return
 	}
 	// WorkOS revokes its sessions; remove local sessions so existing access tokens
