@@ -111,7 +111,7 @@ To get the invitation_id :
 
 The script creates the active local user, assigns the global Admin role, and writes an audit record in one transaction. It stops if the Admin role is already assigned or the user ID, invitation ID, or email already exists. The operator verifies the WorkOS values before running SQL. After seeding, point the invitation URL to `/invite`. The first Admin can then sign in and invite subsequent users through the Admin API.
 
-Existing venue identifiers are Salesforce text IDs, not UUIDs. A resource permission check requires an active local user and active registry entry. It combines grants from global roles and roles assigned directly to that resource. Administrative permissions use an explicit global check. Existing event routes remain authenticated but are not yet governed by scheduling permissions.
+Existing venue identifiers are Salesforce text IDs, not UUIDs. A resource permission check requires an active local user and active registry entry. It combines grants from global roles and roles assigned directly to that resource. Administrative permissions use an explicit global check.
 
 1. Navigate the browser to `GET /auth/login` on the backend. It redirects to the hosted WorkOS AuthKit sign-in page.
 2. WorkOS redirects to `GET /auth/callback`. The backend checks OAuth state, exchanges the code, verifies the access token, and links the user by their immutable WorkOS user ID.
@@ -128,7 +128,7 @@ Both endpoints use the active session and read current PostgreSQL assignments an
 | `GET /auth/access` | `global` contains directly assigned global roles and permissions. `venues` is keyed by Salesforce venue ID. Each venue contains all directly assigned role names and the combined direct and inherited global permission keys. |
 | `GET /api/me/venues` | A list of `{id, name, roles}` ordered by name and ID. Roles are direct venue assignments. A venue visible only through the global Admin role has an empty `roles` array. |
 
-The predefined global Admin role can discover all active venues. Other users see only active venues where they have a direct role assignment. Global roles still contribute effective permissions at visible venues. These endpoints describe current access for the signed-in user and do not change scheduling route enforcement. Use the global scope for global Admin operations.
+The predefined global Admin role can discover all active venues. Other users see only active venues where they have a direct role assignment. Global roles still contribute effective permissions at visible venues. Use the global scope for global Admin operations.
 
 ### Invitation-only WorkOS setup
 
@@ -187,7 +187,7 @@ Invited users become active after completing invitation setup. An authorized Adm
 | `GET /docs` | Swagger UI | Public |
 | `GET /openapi.yaml` | API specification | Public |
 
-For events, the optional `venueId` query parameter filters results and `refresh=true` requests fresh data from Salesforce. The `week` date identifies a week; results cover Monday through Sunday.
+For events, the optional `venueId` query parameter filters results. The `week` date identifies a week; results cover Monday through Sunday. Event responses include only active venues where the user has `schedules.view`. A specified venue requires that permission. Labor summary and target requests require `venueId` and `labor_goals.view` at that venue.
 
 ## Sessions and access
 
@@ -197,7 +197,7 @@ Logout removes the local session and attempts to revoke the WorkOS session, incl
 
 When WorkOS refresh or signing-key retrieval is temporarily unavailable, protected requests return `503` and preserve the local session for a later retry. An explicit `invalid_grant` refresh response returns `401`. Rotated refresh tokens are saved before the replacement access token is verified, but access is denied until verification succeeds.
 
-**Authorization and RBAC are not implemented.** Authenticated active users can request event data for every venue, including by changing the `venueId` filter. Do not use this prototype to protect sensitive production data until authorization is implemented. ADP and scheduling workflows remain under design.
+Event and Labor reads enforce venue permissions. Accounting period reads require an active session. ADP and scheduling workflows remain under design.
 
 ## Salesforce Pub/Sub subscriber
 

@@ -31,13 +31,13 @@ func registerRoutes(
 	mux.HandleFunc("/openapi.yaml", openAPIHandler)
 
 	// --- Events API ---
-	mux.Handle("/api/events", authServer.Middleware(eventsHandler(db, sf, syncWorker)))
-	mux.Handle("/api/events/", authServer.Middleware(eventByIDHandler(db, sf)))
+	mux.Handle("/api/events", authServer.Middleware(venueAccess(db, "schedules.view", false, eventsHandler(db, sf, syncWorker))))
+	mux.Handle("/api/events/", authServer.Middleware(venueAccess(db, "schedules.view", false, eventByIDHandler(db, sf))))
 	mux.Handle("/api/sync/events", authServer.Middleware(syncEventsHandler(syncWorker)))
 
 	// --- Labor Goals API ---
-	mux.Handle("/api/labor-goals/summary", authServer.Middleware(laborGoalsSummaryHandler(db)))
-	mux.Handle("/api/labor-goals/targets", authServer.Middleware(laborGoalsTargetsHandler(db)))
+	mux.Handle("/api/labor-goals/summary", authServer.Middleware(venueAccess(db, "labor_goals.view", true, laborGoalsSummaryHandler(db))))
+	mux.Handle("/api/labor-goals/targets", authServer.Middleware(venueAccess(db, "labor_goals.view", true, laborGoalsTargetsHandler(db))))
 	mux.Handle("/api/labor-goals/periods", authServer.Middleware(accountingPeriodsHandler(db)))
 	access := &authorization.Service{DB: db}
 	requireLaborManage := func(next http.Handler) http.Handler {

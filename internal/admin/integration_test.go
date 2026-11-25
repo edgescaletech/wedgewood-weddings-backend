@@ -253,8 +253,14 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 
 	for _, route := range []struct{ method, path string }{
 		{http.MethodPost, "/api/admin/roles"},
+		{http.MethodGet, "/api/admin/roles/00000000-0000-4000-8000-000000000001"},
+		{http.MethodGet, "/api/admin/permissions"},
+		{http.MethodGet, "/api/admin/roles/00000000-0000-4000-8000-000000000001/permissions"},
 		{http.MethodDelete, "/api/admin/roles/00000000-0000-4000-8000-000000000001"},
 		{http.MethodPut, "/api/admin/roles/00000000-0000-4000-8000-000000000001/permissions"},
+		{http.MethodPost, "/api/admin/roles/00000000-0000-4000-8000-000000000001/permissions"},
+		{http.MethodPatch, "/api/admin/roles/00000000-0000-4000-8000-000000000001/permissions"},
+		{http.MethodDelete, "/api/admin/roles/00000000-0000-4000-8000-000000000001/permissions"},
 	} {
 		if response := call(route.method, route.path, "{}"); response.Code != http.StatusNotFound {
 			t.Fatalf("disabled route %s %s: %d", route.method, route.path, response.Code)

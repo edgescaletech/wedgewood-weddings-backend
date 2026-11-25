@@ -182,7 +182,7 @@ func GetEventGuestCountAndCount(ctx context.Context, db *sql.DB, venueID string,
 	query := `
 		SELECT COALESCE(SUM(guest_count), 0), COUNT(*)
 		FROM events
-		WHERE (venue_id = $1 OR venue_id IS NULL)
+		WHERE venue_id = $1
 		  AND event_date >= $2::date AND event_date <= $3::date;
 	`
 

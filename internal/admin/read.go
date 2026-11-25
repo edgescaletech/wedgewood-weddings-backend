@@ -32,13 +32,11 @@ func (server *Server) Register(mux *http.ServeMux) {
 	register("GET /api/admin/users/{id}", "users.view", server.user)
 	register("GET /api/admin/audit", "users.manage", server.audit)
 	register("GET /api/admin/roles", "roles.view", server.roles)
-	register("GET /api/admin/roles/{id}", "roles.view", server.role)
-	register("GET /api/admin/roles/{id}/permissions", "roles.view", server.role)
-	register("GET /api/admin/permissions", "roles.view", server.permissions)
 	register("GET /api/admin/venues", "venues.manage_access", server.venues)
 	register("GET /api/admin/venues/{id}", "venues.manage_access", server.venue)
 	server.registerMutations(mux)
-	// V1 role definitions are read-only. Unsupported role methods return 404.
+
+	// Unsupported role definition endpoints return 404.
 	mux.HandleFunc("/api/admin/roles", http.NotFound)
 	mux.HandleFunc("/api/admin/roles/", http.NotFound)
 }
