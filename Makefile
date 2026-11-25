@@ -1,8 +1,9 @@
-.PHONY: run build build-pubsub clean test tidy migration.up migration.down migration.drop
+.PHONY: run build build-pubsub clean test test-smoke test-regression tidy migration.up migration.down migration.drop
 
 # Load DATABASE_URL from .env if not already set in the environment
 DB_URL ?= $(or $(DATABASE_URL),$(shell grep -E '^DATABASE_URL=' .env 2>/dev/null | cut -d '=' -f2-))
 MIGRATIONS_DIR := internal/migrations
+SMOKE_BASE_URL ?= http://localhost:8080
 
 ## run: start the HTTP server locally (loads .env automatically)
 run:
@@ -19,6 +20,17 @@ build-pubsub:
 ## test: run all tests
 test:
 	go test ./...
+
+## test-smoke: check health and signed-out route protection on a running API
+test-smoke: export SMOKE_BASE_URL := $(SMOKE_BASE_URL)
+test-smoke:
+	@test -n "$$SMOKE_BASE_URL" || { echo "Set SMOKE_BASE_URL to the running API origin."; exit 1; }
+	go test ./cmd/server -run '^TestAPISmoke$$' -count=1 -timeout=45s -v
+
+## test-regression: run Go tests and PostgreSQL integration tests
+test-regression:
+	@test -n "$$RBAC_TEST_DATABASE_URL" || { echo "Set RBAC_TEST_DATABASE_URL to a disposable PostgreSQL database."; exit 1; }
+	SMOKE_BASE_URL= go test -count=1 ./...
 
 ## tidy: clean up go.mod and go.sum
 tidy:
