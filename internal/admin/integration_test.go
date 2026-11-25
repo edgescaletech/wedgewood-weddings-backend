@@ -398,6 +398,42 @@ func TestConcurrentAdminRemoval(t *testing.T) {
 	if err != nil || allowed {
 		t.Fatalf("unexpected inherited approval: %v %v", allowed, err)
 	}
+	t.Run("effective permissions include scoped grants and denials", func(t *testing.T) {
+		for _, tc := range []struct {
+			query string
+			view  bool
+		}{
+			{"", false},
+			{"?venueId=venue-test", true},
+		} {
+			response := call(http.MethodGet, "/api/admin/users/"+targetID+"/permissions"+tc.query, "")
+			var entries []struct {
+				Permission string
+				Inherited  bool
+				Effective  bool
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &entries); err != nil || response.Code != http.StatusOK {
+				t.Fatalf("effective permissions: %d %s (%v)", response.Code, response.Body, err)
+			}
+			want := map[string]bool{"schedules.view": tc.view, "schedules.approve": false, "users.manage": false}
+			var previous string
+			for _, entry := range entries {
+				if entry.Permission <= previous || entry.Inherited != entry.Effective {
+					t.Fatalf("unexpected permission entry: %+v", entry)
+				}
+				previous = entry.Permission
+				if effective, ok := want[entry.Permission]; ok {
+					if entry.Effective != effective {
+						t.Errorf("%s%s effective = %t, want %t", entry.Permission, tc.query, entry.Effective, effective)
+					}
+					delete(want, entry.Permission)
+				}
+			}
+			if len(want) != 0 {
+				t.Fatalf("missing permission entries: %v", want)
+			}
+		}
+	})
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
 		path := "/api/admin/users/" + targetID + "/permissions/overrides"
 		if method == http.MethodDelete {
