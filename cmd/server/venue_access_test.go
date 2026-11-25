@@ -10,9 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 	"wedding-project/internal/adapters/salesforce"
@@ -155,5 +157,67 @@ func TestSalesforceFallbackFiltersVenues(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || response.Code != http.StatusOK ||
 		len(body.Events) != 1 || body.Events[0].ID != "event-a" {
 		t.Fatalf("Salesforce fallback filtering: %d %s (%v)", response.Code, response.Body, err)
+	}
+}
+
+func TestSalesforceEventDetailFallbackEnforcesVenueAccess(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery(`FROM events\s+LEFT JOIN venues.*\s+WHERE events.id = \$1`).
+		WithArgs("event-b").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	var lookups atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query().Get("q")
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(query, "FROM SBQQ__Quote__c") {
+			_, _ = w.Write([]byte(`{"totalSize":0,"done":true,"records":[]}`))
+			return
+		}
+		if !strings.Contains(query, "WHERE Id = 'event-b'") {
+			t.Error("Salesforce did not receive the expected event detail query")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		lookups.Add(1)
+		_, _ = w.Write([]byte(`{"totalSize":1,"done":true,"records":[{"Id":"event-b","Name":"Private Venue B event","Venue__c":"b","Event_Start_Date_Only__c":"2026-11-17","StageName":"Booked"}]}`))
+	}))
+	defer upstream.Close()
+	client, err := salesforce.NewClient(salesforce.Config{MyDomainURL: upstream.URL, AccessToken: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	requestForVenue := func(venueID string) *http.Request {
+		request := httptest.NewRequest(http.MethodGet, "/api/events/event-b", nil)
+		return request.WithContext(context.WithValue(request.Context(), venueAccessKey{}, map[string]bool{venueID: true}))
+	}
+	denied := httptest.NewRecorder()
+	eventByIDHandler(db, client)(denied, requestForVenue("a"))
+	if denied.Code != http.StatusNotFound || denied.Body.String() != "{\"error\":\"event not found\"}\n" {
+		t.Fatalf("unauthorized Salesforce event detail: %d %s", denied.Code, denied.Body)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if got := lookups.Load(); got != 1 {
+		t.Fatalf("expected Salesforce lookup after cache miss, got %d", got)
+	}
+
+	// The same Salesforce record is accessible to a user authorized at Venue B.
+	allowed := httptest.NewRecorder()
+	eventByIDHandler(nil, client)(allowed, requestForVenue("b"))
+	var event struct {
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+		VenueID string `json:"venueId"`
+	}
+	if err := json.Unmarshal(allowed.Body.Bytes(), &event); err != nil || allowed.Code != http.StatusOK ||
+		event.ID != "event-b" || event.Name != "Private Venue B event" || event.VenueID != "b" {
+		t.Fatalf("authorized Salesforce event detail: %d %s (%v)", allowed.Code, allowed.Body, err)
 	}
 }
