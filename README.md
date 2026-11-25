@@ -224,21 +224,21 @@ Set `RBAC_TEST_DATABASE_URL` to a disposable PostgreSQL database to run the opti
 
 ### Backend functional tests
 
-Run these checks from the backend repository. Neither command starts React.
+Copy the two backend functional test settings from `.env.example` into the
+Git-ignored `.env.test` in the backend repository. Use unquoted values. Point
+`SMOKE_BASE_URL` at a running Go API and set `RBAC_TEST_DATABASE_URL` to a
+disposable PostgreSQL database with permission to create schemas.
 
-- `make test-smoke` sends read-only HTTP requests to an already-running Go API
-  at `http://localhost:8080`. It checks the JSON health response and confirms
-  that identity, venue, events, and Admin routes reject signed-out requests.
-  For a test deployment, run
-  `make test-smoke SMOKE_BASE_URL=https://api-staging.example.test`.
-  The check uses no WorkOS credentials and does not follow redirects.
-- `make test-regression` runs the Go suite and its PostgreSQL integration tests
-  without using cached results. Export `RBAC_TEST_DATABASE_URL` for a disposable
-  database with permission to create schemas before running it. The target
-  fails immediately if the variable is missing. The integration tests apply
-  their migrations in temporary schemas and clean them up after each run.
-  The suite covers session handling, Admin safeguards, venue isolation, and
-  event fallback using local provider doubles.
+```sh
+make test-functional
+```
+
+Run either suite on its own with `make test-smoke` or `make test-regression`.
+Smoke checks API health and signed-out route protection with read-only requests.
+Regression runs the uncached Go suite, applies migrations in temporary schemas,
+and cleans up those schemas after each run. Neither suite starts the Go API or
+React. To override the smoke URL for one run, use
+`make test-functional SMOKE_BASE_URL=https://api-staging.example.test`.
 
 ## Database-backed event synchronization
 

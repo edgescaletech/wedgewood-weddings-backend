@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -23,7 +24,6 @@ func TestAPISmoke(t *testing.T) {
 	}
 
 	client := &http.Client{
-		Timeout: 5 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -43,8 +43,20 @@ func TestAPISmoke(t *testing.T) {
 		{"/api/admin/users", http.StatusUnauthorized, "error", "authentication required"},
 	} {
 		t.Run(strings.TrimPrefix(check.path, "/"), func(t *testing.T) {
+			timeout := 5 * time.Second
+			if check.path == "/healthz" {
+				// The first request can wake an idle test deployment.
+				timeout = 75 * time.Second
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), timeout)
+			defer cancel()
+
 			endpoint := base.JoinPath(check.path)
-			response, err := client.Get(endpoint.String())
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := client.Do(request)
 			if err != nil {
 				t.Fatal(err)
 			}
