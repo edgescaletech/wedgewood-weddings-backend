@@ -115,7 +115,11 @@ func (server *Server) SetInvitePassword(writer http.ResponseWriter, request *htt
 		if workOSStatus(err, 429) {
 			inviteRateLimited(writer, 60)
 		} else {
-			fail(writer, http.StatusUnprocessableEntity, "WorkOS rejected this password. Choose a stronger password and try again.")
+			message, _ := workOSPasswordError(err, false)
+			if message == "" {
+				message = "WorkOS couldn’t save this password. Try a different password or use Generate."
+			}
+			fail(writer, http.StatusUnprocessableEntity, message)
 		}
 		return
 	}
