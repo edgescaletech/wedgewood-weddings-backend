@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"wedding-project/internal/auth"
 	"wedding-project/internal/authorization"
 )
@@ -72,42 +73,32 @@ func (server *Server) runMutation(ctx context.Context, actorID, permission strin
 
 // ensureAdministrator requires an active global user with every management permission used in V1.
 func ensureAdministrator(ctx context.Context, tx *sql.Tx) error {
-	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT u.id FROM users u JOIN user_roles ur ON ur.user_id=u.id JOIN roles r ON r.id=ur.role_id WHERE u.is_active AND r.assignment_type='global' AND ur.resource_id IS NULL`)
-	if err != nil {
-		return err
-	}
-	var candidates []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return err
-		}
-		candidates = append(candidates, id)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return err
-	}
 	permissions := []string{"users.view", "users.manage", "roles.view", "roles.assign", "venues.manage_access"}
-	for _, id := range candidates {
-		complete := true
-		for _, key := range permissions {
-			allowed, err := authorization.HasGlobalPermissionTx(ctx, tx, id, key)
-			if err != nil {
-				return err
-			}
-			if !allowed {
-				complete = false
-				break
-			}
-		}
-		if complete {
-			return nil
-		}
+	var exists bool
+	err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM users u
+			JOIN user_roles ur ON ur.user_id = u.id AND ur.resource_id IS NULL
+			JOIN role_permissions rp ON rp.role_id = ur.role_id
+			JOIN permissions p ON p.id = rp.permission_id
+			WHERE u.is_active AND p.key = ANY($1::text[])
+			  AND EXISTS (
+				SELECT 1 FROM user_roles candidate
+				JOIN roles r ON r.id = candidate.role_id
+				WHERE candidate.user_id = u.id AND candidate.resource_id IS NULL
+				  AND r.assignment_type = 'global'
+			  )
+			GROUP BY u.id
+			HAVING count(DISTINCT p.key) = cardinality($1::text[])
+		)`, pq.Array(permissions)).Scan(&exists)
+	if err != nil {
+		return err
 	}
-	return errConflict
+	if !exists {
+		return errConflict
+	}
+	return nil
 }
 
 // audit writes an audit record in the same transaction as the privileged change.
