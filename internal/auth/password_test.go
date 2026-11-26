@@ -17,7 +17,7 @@ type passwordMock struct {
 	calls int
 }
 
-func (provider *passwordMock) Password(_ context.Context, email, password string) (*workos.AuthenticateResponse, error) {
+func (provider *passwordMock) Password(_ context.Context, email, password, userAgent string) (*workos.AuthenticateResponse, error) {
 	provider.calls++
 	return provider.response, nil
 }

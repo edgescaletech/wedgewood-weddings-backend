@@ -18,6 +18,7 @@ type Identity struct {
 	Email       string `json:"email"`
 	DisplayName string `json:"displayName"`
 	IsActive    bool   `json:"isActive"`
+	sessionID   string
 }
 
 type contextKey struct{}
@@ -145,6 +146,7 @@ func (server *Server) session(writer http.ResponseWriter, request *http.Request)
 			}
 			return user, false
 		}
+		user.sessionID = claims.SessionID
 		return user, true
 	}
 
@@ -165,6 +167,7 @@ func (server *Server) session(writer http.ResponseWriter, request *http.Request)
 		return user, false
 	}
 
+	user.sessionID = claims.SessionID
 	return user, true
 }
 

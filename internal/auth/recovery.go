@@ -16,7 +16,7 @@ import (
 const verificationCookie = "email_verification"
 
 type recoveryProvider interface {
-	VerifyEmail(context.Context, string, string) (*workos.AuthenticateResponse, error)
+	VerifyEmail(context.Context, string, string, string) (*workos.AuthenticateResponse, error)
 	RequestPasswordReset(context.Context, string) error
 	ConfirmPasswordReset(context.Context, string, string) (*workos.ResetPasswordResponse, error)
 }
@@ -95,7 +95,7 @@ func (server *Server) VerifyEmail(writer http.ResponseWriter, request *http.Requ
 		fail(writer, http.StatusServiceUnavailable, "authentication unavailable")
 		return
 	}
-	response, err := provider.VerifyEmail(request.Context(), state.Token, code)
+	response, err := provider.VerifyEmail(request.Context(), state.Token, code, request.UserAgent())
 	if err != nil || response == nil || response.User == nil {
 		// Keep the pending cookie so a user can retry an incorrect code or outage.
 		if isRecoveryUnavailable(err) {

@@ -72,4 +72,5 @@ func registerAuthRoutes(mux *http.ServeMux, authServer *auth.Server) {
 	mux.HandleFunc("/auth/callback", authServer.Callback)
 	mux.HandleFunc("/auth/logout", authServer.Logout)
 	mux.Handle("/auth/me", authServer.Middleware(http.HandlerFunc(authServer.Me)))
+	mux.Handle("GET /auth/sessions", authServer.Middleware(http.HandlerFunc(authServer.ActiveSessions)))
 }

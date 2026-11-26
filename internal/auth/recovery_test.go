@@ -23,10 +23,10 @@ type recoveryMock struct {
 	verificationCalls int
 }
 
-func (provider *recoveryMock) Password(context.Context, string, string) (*workos.AuthenticateResponse, error) {
+func (provider *recoveryMock) Password(context.Context, string, string, string) (*workos.AuthenticateResponse, error) {
 	return nil, provider.passwordErr
 }
-func (provider *recoveryMock) VerifyEmail(_ context.Context, token, code string) (*workos.AuthenticateResponse, error) {
+func (provider *recoveryMock) VerifyEmail(_ context.Context, token, code, userAgent string) (*workos.AuthenticateResponse, error) {
 	provider.verificationCalls++
 	if token != "private-pending-token" || code != "123456" {
 		return nil, errors.New("invalid code")
