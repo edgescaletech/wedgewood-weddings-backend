@@ -836,11 +836,12 @@ components:
           items: {type: string}
     User:
       type: object
-      required: [id, workosId, email, isActive]
+      required: [id, workosId, email, displayName, isActive]
       properties:
         id: {type: string, format: uuid}
         workosId: {type: string}
         email: {type: string, format: email}
+        displayName: {type: string, description: Local display name. May be empty.}
         isActive: {type: boolean}
     WeeklyEventsResponse:
       type: object

@@ -13,10 +13,11 @@ import (
 
 // Identity represents the local user linked to a WorkOS identity.
 type Identity struct {
-	ID       string `json:"id"`
-	WorkOSID string `json:"workosId"`
-	Email    string `json:"email"`
-	IsActive bool   `json:"isActive"`
+	ID          string `json:"id"`
+	WorkOSID    string `json:"workosId"`
+	Email       string `json:"email"`
+	DisplayName string `json:"displayName"`
+	IsActive    bool   `json:"isActive"`
 }
 
 type contextKey struct{}
@@ -51,7 +52,7 @@ func (server *Server) session(writer http.ResponseWriter, request *http.Request)
 	var sealed string
 	err = transaction.QueryRowContext(
 		request.Context(),
-		`SELECT users.id, users.workos_id, users.email, (users.is_active AND users.workos_invitation_id IS NOT NULL), sessions.sealed_session
+		`SELECT users.id, users.workos_id, users.email, users.display_name, (users.is_active AND users.workos_invitation_id IS NOT NULL), sessions.sealed_session
    FROM auth_sessions AS sessions
    JOIN users ON users.workos_id = sessions.workos_id
    WHERE sessions.id_hash = $1 AND sessions.expires_at > now()
@@ -61,6 +62,7 @@ func (server *Server) session(writer http.ResponseWriter, request *http.Request)
 		&user.ID,
 		&user.WorkOSID,
 		&user.Email,
+		&user.DisplayName,
 		&user.IsActive,
 		&sealed,
 	)
@@ -205,6 +207,7 @@ func (server *Server) Me(writer http.ResponseWriter, request *http.Request) {
 	}
 
 	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("Cache-Control", "no-store")
 
 	_ = json.NewEncoder(writer).Encode(identity)
 }
