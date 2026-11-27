@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	workos "github.com/workos/workos-go/v7"
 )
@@ -25,11 +26,17 @@ func (mock *sessionListMock) ListSessions(_ context.Context, userID string) ([]w
 
 func TestActiveSessionsScopesWorkOSToCurrentUser(t *testing.T) {
 	agent := "Test browser on another device"
+	now := time.Now()
+	future := now.Add(time.Hour).Format(time.RFC3339Nano)
+	past := now.Add(-time.Hour).Format(time.RFC3339Nano)
 	mock := &sessionListMock{sessions: []workos.UserSessionsListItem{
-		{ID: "current", UserID: "user_1", Status: "active"},
-		{ID: "other", UserID: "user_1", Status: "active", UserAgent: &agent, CreatedAt: "2026-11-20T12:00:00Z"},
-		{ID: "revoked", UserID: "user_1", Status: "revoked"},
-		{ID: "unrelated", UserID: "user_2", Status: "active"},
+		{ID: "current", UserID: "user_1", Status: "active", ExpiresAt: future},
+		{ID: "other", UserID: "user_1", Status: "active", ExpiresAt: future, UserAgent: &agent},
+		{ID: "revoked", UserID: "user_1", Status: "revoked", ExpiresAt: future},
+		{ID: "ended", UserID: "user_1", Status: "active", ExpiresAt: future, EndedAt: &past},
+		{ID: "expired", UserID: "user_1", Status: "active", ExpiresAt: past},
+		{ID: "missing-expiry", UserID: "user_1", Status: "active"},
+		{ID: "unrelated", UserID: "user_2", Status: "active", ExpiresAt: future},
 	}}
 	server := &Server{provider: mock}
 	request := httptest.NewRequest(http.MethodGet, "/auth/sessions?userId=user_2", nil)
@@ -44,8 +51,10 @@ func TestActiveSessionsScopesWorkOSToCurrentUser(t *testing.T) {
 		response.Code != http.StatusOK || mock.requestedUser != "user_1" || len(sessions) != 2 {
 		t.Fatalf("unexpected session list: %d %s (%v)", response.Code, response.Body, err)
 	}
-	if !sessions[0].Current || sessions[0].UserAgent == nil || *sessions[0].UserAgent != "Current browser" ||
-		sessions[1].Current || sessions[1].UserAgent == nil || *sessions[1].UserAgent != agent {
+	if sessions[0].ID != "current" || !sessions[0].Current ||
+		sessions[0].UserAgent == nil || *sessions[0].UserAgent != "Current browser" ||
+		sessions[1].ID != "other" || sessions[1].Current ||
+		sessions[1].UserAgent == nil || *sessions[1].UserAgent != agent {
 		t.Fatalf("incorrect session metadata: %s", response.Body)
 	}
 }

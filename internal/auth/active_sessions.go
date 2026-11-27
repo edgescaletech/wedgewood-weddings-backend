@@ -43,8 +43,13 @@ func (server *Server) ActiveSessions(writer http.ResponseWriter, request *http.R
 	}
 
 	active := make([]activeSession, 0, len(sessions))
+	now := time.Now()
 	for _, session := range sessions {
-		if session.UserID != user.WorkOSID || session.Status != "active" || session.ID == "" {
+		if session.UserID != user.WorkOSID || session.Status != "active" || session.ID == "" || session.EndedAt != nil {
+			continue
+		}
+		expiresAt, err := time.Parse(time.RFC3339, session.ExpiresAt)
+		if err != nil || !expiresAt.After(now) {
 			continue
 		}
 		current := session.ID == user.sessionID
