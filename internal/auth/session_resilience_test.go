@@ -93,7 +93,7 @@ func TestRefreshFailure(t *testing.T) {
 				verify: func(context.Context, string) (*claims, error) { return nil, jwt.ErrTokenExpired },
 			}
 			mock.ExpectBegin()
-			mock.ExpectQuery("SELECT users.id").WillReturnRows(sqlmock.NewRows([]string{"id", "workos_id", "email", "is_active", "sealed_session"}).AddRow("id", "user_1", "a@example.com", true, sealed))
+			mock.ExpectQuery("SELECT users.id").WillReturnRows(sqlmock.NewRows([]string{"id", "workos_id", "email", "display_name", "is_active", "sealed_session"}).AddRow("id", "user_1", "a@example.com", "", true, sealed))
 			mock.ExpectRollback()
 			request := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
 			request.AddCookie(&http.Cookie{Name: "session", Value: "opaque"})
@@ -133,7 +133,7 @@ func TestRotatedTokenSavedDuringKeyOutage(t *testing.T) {
 		},
 	}
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT users.id").WillReturnRows(sqlmock.NewRows([]string{"id", "workos_id", "email", "is_active", "sealed_session"}).AddRow("id", "user_1", "a@example.com", true, sealed))
+	mock.ExpectQuery("SELECT users.id").WillReturnRows(sqlmock.NewRows([]string{"id", "workos_id", "email", "display_name", "is_active", "sealed_session"}).AddRow("id", "user_1", "a@example.com", "", true, sealed))
 	mock.ExpectExec("UPDATE auth_sessions").WithArgs(sealedRefreshMatcher{secret: secret, refresh: "rotated"}, sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	request := httptest.NewRequest(http.MethodGet, "/auth/me", nil)

@@ -20,13 +20,15 @@ type recoveryMock struct {
 	passwordErr       error
 	resetErr          error
 	resetCalls        int
+	confirmResetErr   error
+	confirmResetCalls int
 	verificationCalls int
 }
 
-func (provider *recoveryMock) Password(context.Context, string, string) (*workos.AuthenticateResponse, error) {
+func (provider *recoveryMock) Password(context.Context, string, string, string) (*workos.AuthenticateResponse, error) {
 	return nil, provider.passwordErr
 }
-func (provider *recoveryMock) VerifyEmail(_ context.Context, token, code string) (*workos.AuthenticateResponse, error) {
+func (provider *recoveryMock) VerifyEmail(_ context.Context, token, code, userAgent string) (*workos.AuthenticateResponse, error) {
 	provider.verificationCalls++
 	if token != "private-pending-token" || code != "123456" {
 		return nil, errors.New("invalid code")
@@ -38,8 +40,12 @@ func (provider *recoveryMock) RequestPasswordReset(context.Context, string) erro
 	return provider.resetErr
 }
 func (provider *recoveryMock) ConfirmPasswordReset(_ context.Context, token, password string) (*workos.ResetPasswordResponse, error) {
+	provider.confirmResetCalls++
 	if token != "valid-token" || password != "new-password" {
 		return nil, errors.New("invalid token")
+	}
+	if provider.confirmResetErr != nil {
+		return nil, provider.confirmResetErr
 	}
 	return &workos.ResetPasswordResponse{User: &workos.User{ID: "user_1"}}, nil
 }
@@ -92,8 +98,9 @@ func TestVerifyEmailCompletesSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mock.ExpectQuery("SELECT id FROM users WHERE workos_id").WithArgs("user_1").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("local-user"))
 	mock.ExpectBegin()
-	mock.ExpectExec("INSERT INTO users").WithArgs(sqlmock.AnyArg(), "user_1", "person@example.com").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE users SET workos_id").WithArgs("user_1", "person@example.com", "local-user", nil).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO auth_sessions").WithArgs(sqlmock.AnyArg(), "user_1", sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	request := recoveryRequest("/auth/verify-email", `{"code":"123456"}`)
@@ -159,5 +166,73 @@ func TestResetPasswordDeletesLocalSessions(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestResetPasswordWorkOSFailureResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		upstream *workos.APIError
+		status   int
+		message  string
+	}{
+		{
+			name:     "expired reset link",
+			upstream: &workos.APIError{StatusCode: http.StatusBadRequest, Code: "password_reset_token_expired"},
+			status:   http.StatusGone,
+			message:  "This reset link has expired. Request a new password reset link.",
+		},
+		{
+			name:     "used reset link",
+			upstream: &workos.APIError{StatusCode: http.StatusBadRequest, ErrorCode: "password_reset_token_consumed"},
+			status:   http.StatusGone,
+			message:  "This reset link has already been used. Request a new password reset link.",
+		},
+		{
+			name: "rejected password",
+			upstream: &workos.APIError{
+				StatusCode:  http.StatusUnprocessableEntity,
+				FieldErrors: []workos.FieldError{{Field: "new_password", Code: "password_breached"}},
+			},
+			status:  http.StatusUnprocessableEntity,
+			message: "This password appeared in a data breach. Choose a different password.",
+		},
+		{
+			name:     "rate limit",
+			upstream: &workos.APIError{StatusCode: http.StatusTooManyRequests, RetryAfter: 30},
+			status:   http.StatusTooManyRequests,
+			message:  "Too many reset attempts. Wait a moment and try again.",
+		},
+		{
+			name:     "temporary provider failure",
+			upstream: &workos.APIError{StatusCode: http.StatusBadGateway, Message: "private provider details"},
+			status:   http.StatusServiceUnavailable,
+			message:  "Password reset is temporarily unavailable. Try again.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &recoveryMock{confirmResetErr: tc.upstream}
+			// Session cleanup needs a database and is only valid after a successful reset.
+			server := &Server{config: Config{AppURL: "http://localhost:3000"}, provider: provider}
+			recorder := httptest.NewRecorder()
+			request := recoveryRequest("/auth/reset-password", `{"token":"valid-token","newPassword":"new-password"}`)
+			server.ResetPassword(recorder, request)
+
+			var response struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("invalid error response: %v", err)
+			}
+			if recorder.Code != tc.status || response.Error != tc.message {
+				t.Fatalf("reset response = %d %q, want %d %q", recorder.Code, response.Error, tc.status, tc.message)
+			}
+			if provider.confirmResetCalls != 1 {
+				t.Fatalf("WorkOS reset calls = %d, want 1", provider.confirmResetCalls)
+			}
+			if recorder.Header().Get("Set-Cookie") != "" {
+				t.Fatal("failed reset changed the session cookie")
+			}
+		})
 	}
 }

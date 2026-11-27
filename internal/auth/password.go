@@ -14,7 +14,7 @@ import (
 
 // passwordProvider isolates password authentication for testing.
 type passwordProvider interface {
-	Password(context.Context, string, string) (*workos.AuthenticateResponse, error)
+	Password(context.Context, string, string, string) (*workos.AuthenticateResponse, error)
 }
 
 // PasswordLogin checks credentials with WorkOS and creates the usual local session.
@@ -68,7 +68,7 @@ func (server *Server) PasswordLogin(writer http.ResponseWriter, request *http.Re
 		return
 	}
 
-	response, err := provider.Password(request.Context(), credentials.Email, credentials.Password)
+	response, err := provider.Password(request.Context(), credentials.Email, credentials.Password, request.UserAgent())
 
 	if err != nil {
 		// A pending token is stored in an encrypted HttpOnly cookie, never JSON.

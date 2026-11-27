@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -128,6 +129,43 @@ func TestEventByIDHandler_Validation(t *testing.T) {
 	})
 }
 
+func TestEventHandlersRequireVenueAuthorization(t *testing.T) {
+	for path, handler := range map[string]http.HandlerFunc{
+		"/api/events?week=2026-11-16": eventsHandler(nil, nil, nil),
+		"/api/events/event-1":         eventByIDHandler(nil, nil),
+	} {
+		response := httptest.NewRecorder()
+		handler(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusForbidden {
+			t.Errorf("%s: got %d, want 403", path, response.Code)
+		}
+	}
+}
+
+func TestEventsHandlerReturnsEmptyWithoutAuthorizedVenues(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/api/events?week=2026-11-16", nil)
+	request = request.WithContext(context.WithValue(request.Context(), venueAccessKey{}, map[string]bool{}))
+	response := httptest.NewRecorder()
+
+	// No storage or Salesforce client is needed to answer this request.
+	eventsHandler(nil, nil, nil)(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body)
+	}
+	var body struct {
+		WeekStart string
+		WeekEnd   string
+		Events    []json.RawMessage
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.WeekStart != "2026-11-16" || body.WeekEnd != "2026-11-22" || body.Events == nil || len(body.Events) != 0 {
+		t.Fatalf("unexpected response: %s", response.Body)
+	}
+}
+
 func TestSyncEventsHandler_Validation(t *testing.T) {
 	handler := syncEventsHandler(nil)
 
@@ -167,10 +205,10 @@ func TestSyncEventsHandler_Validation(t *testing.T) {
 
 func TestParseFlexibleDate(t *testing.T) {
 	testDates := []struct {
-		input    string
-		wantYear int
+		input     string
+		wantYear  int
 		wantMonth time.Month
-		wantDay  int
+		wantDay   int
 	}{
 		{"Sun Jan 1, 2023", 2023, time.January, 1},
 		{"Mon Jan 30, 2023", 2023, time.January, 30},

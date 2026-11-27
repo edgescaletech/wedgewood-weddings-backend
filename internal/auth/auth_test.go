@@ -70,7 +70,7 @@ func TestMiddlewareRejectsMissingAndInactiveSessions(t *testing.T) {
 		t.Fatalf("missing session: %d", w.Code)
 	}
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT users.id").WillReturnRows(sqlmock.NewRows([]string{"id", "workos_id", "email", "is_active", "sealed_session"}).AddRow("id", "user_1", "a@example.com", false, "sealed"))
+	mock.ExpectQuery("SELECT users.id").WillReturnRows(sqlmock.NewRows([]string{"id", "workos_id", "email", "display_name", "is_active", "sealed_session"}).AddRow("id", "user_1", "a@example.com", "", false, "sealed"))
 	mock.ExpectRollback()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: "session", Value: "session"})
@@ -137,7 +137,7 @@ func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) 
 	return f(request)
 }
 
-func TestCallbackCreatesInactiveUser(t *testing.T) {
+func TestCallbackUsesExistingAccount(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -153,8 +153,9 @@ func TestCallbackCreatesInactiveUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mock.ExpectQuery("SELECT id FROM users WHERE workos_id").WithArgs("user_1").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("local-user"))
 	mock.ExpectBegin()
-	mock.ExpectExec("INSERT INTO users").WithArgs(sqlmock.AnyArg(), "user_1", "person@example.com").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE users SET workos_id").WithArgs("user_1", "person@example.com", "local-user", nil).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO auth_sessions").WithArgs(sqlmock.AnyArg(), "user_1", sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	request := httptest.NewRequest(http.MethodGet, "/auth/callback?code=code&state=valid", nil)
@@ -163,6 +164,9 @@ func TestCallbackCreatesInactiveUser(t *testing.T) {
 	server.Callback(recorder, request)
 	if recorder.Code != http.StatusSeeOther {
 		t.Fatalf("callback status: %d", recorder.Code)
+	}
+	if location := recorder.Header().Get("Location"); location != "https://app.example/login" {
+		t.Fatalf("callback location: %q", location)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -191,7 +195,7 @@ func TestRefreshExpiredAccessToken(t *testing.T) {
 		},
 	}
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT users.id").WillReturnRows(sqlmock.NewRows([]string{"id", "workos_id", "email", "is_active", "sealed_session"}).AddRow("local-id", "user_1", user.Email, true, sealed))
+	mock.ExpectQuery("SELECT users.id").WillReturnRows(sqlmock.NewRows([]string{"id", "workos_id", "email", "display_name", "is_active", "sealed_session"}).AddRow("local-id", "user_1", user.Email, "Scheduling Test User", true, sealed))
 	mock.ExpectExec("UPDATE auth_sessions").WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	request := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
@@ -200,6 +204,10 @@ func TestRefreshExpiredAccessToken(t *testing.T) {
 	server.Middleware(http.HandlerFunc(server.Me)).ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("refresh status: %d", recorder.Code)
+	}
+	var identity Identity
+	if err := json.Unmarshal(recorder.Body.Bytes(), &identity); err != nil || identity.DisplayName != "Scheduling Test User" {
+		t.Fatalf("expected the local display name in /auth/me, got %q (%v)", identity.DisplayName, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

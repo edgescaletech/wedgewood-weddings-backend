@@ -69,21 +69,78 @@ Go HTTP API for the venue scheduling prototype. Salesforce provides event data; 
 
 ## Authentication flow
 
+### Admin management status
+
+Admin endpoints require an active session and the relevant global permission. Mutations require an `Origin` matching `APP_URL`, and JSON bodies where applicable. They serialize privileged changes, recheck the actor's permissions, write an audit record in the same transaction, and reject changes that leave no active administrator with all management permissions. Users cannot modify their own privileged assignments. An actor can grant only permissions they currently hold.
+
+`POST /api/admin/users` accepts `email`, `displayName`, and optional `roles` (an array of `{roleId, venueId}` assignments). Send a client-generated UUID in the `Idempotency-Key` header. The same key and request can retry an incomplete invitation. Use a fresh key for a separate invitation or corrected request after a definitive `400`. Reusing a key with different details or independently inviting the same account returns `409`. Initial roles use the same authorization and audit rules as standalone assignments. Venue invitations bind to the registry UUID at creation. A temporarily inactive venue can be retried with the same key after reactivation. If the venue was deleted, the operation returns `409` and releases its email reservation. Completed requests remain replayable by key, and an email can be invited again once no local account owns it.
+
+WorkOS sends the invitation email. The invitee opens the custom invitation page, verifies their address with a WorkOS Magic Auth code, and sets their first password. PostgreSQL links the pending account after WorkOS confirms the password update and attests that the exact verified identity accepted the stored invitation. The link preserves the Admin-supplied display name and roles and activates the account. Subsequent sign-ins use the existing WorkOS identity.
+
+Use `POST /api/admin/users/{id}/invitation/resend` with a new idempotency key to resend a pending invitation or replace an expired one. Retrying that resend uses the same key. If delivery succeeds but local finalization fails, a retry uses the persisted WorkOS invitation ID and rechecks the Admin's permissions. Concurrent retries may receive 503 while delivery holds the operation lock. Retry with the same key. The one-hour retry window starts immediately before the first send or resend. Failed invitation lookups do not start it. If WorkOS delivery remains ambiguous after one hour, inspect the attempt in `user_invitation_operations` and reconcile the original delivery with WorkOS before any operator changes. Preserve the operation and verify the WorkOS invitation ID from provider records before resuming. A separate create request will not replace it. PostgreSQL enforces one local owner per case-insensitive email, including pending and deactivated accounts. If a sign-in claims an address during invitation finalization, the invitation returns 409 and retains its delivery ID. If the invitation claims the address first, the conflicting sign-in returns 409 without issuing a session.
+
+`PATCH /api/admin/users/{id}` updates the local display name. Use the activate and deactivate endpoints to manage access. Deactivation ends local sessions and preserves role assignments.
+
+Role assignments use `POST /api/admin/users/{id}/roles` with `roleId` and optional `venueId`; removal uses `DELETE /api/admin/users/{id}/roles/{assignmentId}`. A user can hold different roles across venues, with one direct role per venue. Change a venue role with `PUT /api/admin/users/{id}/roles/{assignmentId}` and `{"roleId":"..."}`. The replacement is atomic and keeps the same venue. Migration 006 enforces the one-role-per-venue constraint. V1 exposes read-only role definitions and permission mappings. Authorized operators can configure them in PostgreSQL. Reactivating a user requires authority over the permissions in every retained role. Roles on suspended resources require global authority because these grants can resume after reopening. The roles and effective-permissions endpoints show access from assigned roles. Effective permissions accept an optional `venueId` query parameter. User-specific overrides and their API routes have been removed. The effective-permissions response no longer includes `override`; `inherited` and `effective` both report role-derived access.
+
+The Users & Access directory requests `GET /api/admin/users?view=directory` with `limit`, `offset`, and optional `search`, `role`, `status`, `venueId`, and `canPublish` filters. Search matches email or display name. With a venue selected, publishing access requires an active venue and an active user with `schedules.publish` through a direct or global grant. The venue picker uses `GET /api/admin/venues?view=directory&active=true` with server-side search and paging. Both directory responses return `{items, total}`. Requests that omit the directory view continue to return arrays.
+
+### Seed the first Admin
+
+1. Apply the database migrations and send the first Admin an invitation from the WorkOS dashboard while the application's invitation URL still points to hosted AuthKit. The first-party page requires a local invitation record, which does not exist before this seed.
+2. After acceptance, verify the invitation ID, accepted WorkOS user ID, and matching recipient email in the same WorkOS environment used by the API.
+3. Run the script from the backend repository root with your private database connection and the verified values.
+
+   ```sh
+   psql "$DATABASE_URL" -X -f scripts/seed-first-admin.sql \
+     -v workos_user_id='REPLACE_WITH_ACCEPTED_WORKOS_USER_ID' \
+     -v workos_invitation_id='REPLACE_WITH_WORKOS_INVITATION_ID' \
+     -v email='admin@example.com' \
+     -v display_name='First Admin'
+   ```
+
+To get the invitation_id :
+   ```
+   curl -fsSG 'https://api.workos.com/user_management/invitations' \
+  -H "Authorization: Bearer $workos_api_key" \
+  --data-urlencode 'email=your_email' |
+  jq '.data[] | {id, email, state, accepted_user_id}'
+
+   ```
+
+
+The script creates the active local user, assigns the global Admin role, and writes an audit record in one transaction. It stops if the Admin role is already assigned or the user ID, invitation ID, or email already exists. The operator verifies the WorkOS values before running SQL. After seeding, point the invitation URL to `/invite`. The first Admin can then sign in and invite subsequent users through the Admin API.
+
+Existing venue identifiers are Salesforce text IDs, not UUIDs. A resource permission check requires an active local user and active registry entry. It combines grants from global roles and roles assigned directly to that resource. Administrative permissions use an explicit global check.
+
 1. Navigate the browser to `GET /auth/login` on the backend. It redirects to the hosted WorkOS AuthKit sign-in page.
 2. WorkOS redirects to `GET /auth/callback`. The backend checks OAuth state, exchanges the code, verifies the access token, and links the user by their immutable WorkOS user ID.
-3. The backend creates an active local user if one does not already exist, establishes a session, and redirects the browser to `APP_URL`. Existing users retain their current active status.
-4. Inactive existing users must be activated by a privately authorized operator. See [Activate a user](#activate-a-user).
+3. On first sign-in, the backend verifies invitation acceptance before linking the local account. On later sign-ins it uses the linked WorkOS ID. It establishes a session and redirects to `APP_URL`.
+4. Completing invitation setup activates the local account.
 5. The frontend can call `GET /auth/me` with credentials to retrieve the active local identity.
 
-### Temporary signup
+### Current-user authorization
 
-Open `/signup/` on the frontend to create an account. The page sends email and password to `POST /auth/signup`, which creates an unverified WorkOS user. The password is handled by WorkOS and is not saved in PostgreSQL. After signup, sign in using the existing login page; WorkOS can require email verification, and the local user is created on the first successful sign-in.
+Both endpoints use the active session and read current PostgreSQL assignments and permission mappings. They require no Admin permission and return `Cache-Control: no-store`.
 
-To disable signup later, remove the `/auth/signup` route in `cmd/server/main.go` and deploy the backend; deleting the frontend page alone does not disable the API. Then remove the signup handler, rate limiter, tests and OpenAPI entry, the frontend `signup/` directory, and its entry in `vite.config.js`.
+| Endpoint | Response |
+| --- | --- |
+| `GET /auth/access` | `global` contains directly assigned global roles and permissions. `venues` is keyed by Salesforce venue ID. Each venue contains all directly assigned role names and the combined direct and inherited global permission keys. |
+| `GET /api/me/venues` | A list of `{id, name, roles}` ordered by name and ID. Roles are direct venue assignments. A venue visible only through the global Admin role has an empty `roles` array. |
 
-Signup is limited to 30 POST requests per 10 minutes per server process using an in-memory counter. A full window returns `429` with `Retry-After`. The counter resets on restart and is not shared between instances. It does not distinguish clients, so one busy or abusive client can temporarily block everyone on that instance. Use a trusted edge per-IP rate limiter for public deployment.
+The predefined global Admin role can discover all active venues. Other users see only active venues where they have a direct role assignment. Global roles still contribute effective permissions at visible venues. Use the global scope for global Admin operations.
 
-New users are temporarily created active by the `INSERT INTO users` statement in `internal/auth/login.go`. To restore inactive-by-default behavior, change its `is_active` value from `TRUE` to `FALSE` (or omit `is_active` and its value if the database column default is false). This affects future users only and does not deactivate existing accounts. No migration is needed for the explicit value; the existing migration's default remains false.
+### Invitation-only WorkOS setup
+
+In each WorkOS environment, turn off public **Sign up** under **Authentication**. Keep **Email + Password**, WorkOS invitation delivery, and email verification enabled. Under **Applications → your application → Redirects**, set **User invitation URL** to the frontend's `https://<frontend-host>/invite`. For local Vite development, use `http://localhost:5173/invite` if Vite is running on port 5173. WorkOS supplies `invitation_token` in the email link. Send a fresh invitation after updating the setting. The invitation URL is separate from the OAuth callback and password reset URL. [WorkOS invitation delivery and URL setup](https://workos.com/docs/authkit/custom-emails)
+
+Enable **Magic Auth** and its default email delivery in the WorkOS application. Apply migration 010 before running the new backend. The invitation page loads the read-only recipient profile, then requests a six-digit code through `POST /auth/invite/send-code`. `POST /auth/invite/verify` authenticates the code with WorkOS and checks the exact invitation and accepted user ID. The browser receives a ten-minute onboarding cookie backed by a hashed session ID in PostgreSQL. `POST /auth/invite/password` sets the password on that verified user through WorkOS, links the local account, and consumes the session. The user becomes active and can sign in after setup. No password, code, or WorkOS authentication token is persisted.
+
+Refreshing resumes from the onboarding cookies. If the WorkOS invitation was accepted but verification could not be recorded locally, reopen the original link and request another code. The backend verifies the original acceptance again. A definite password policy rejection can be retried. An ambiguous password update is reserved against replay. If the password worked, a later password sign-in reconciles the exact reserved identity after a brief grace period. If WorkOS never applied the password or the original invitation changed, an administrator must review the account before retrying setup.
+
+**Staging verification.** With an approved test mailbox, send a new invitation from Users & Access. Open `/invite`, confirm the saved name and email, click Continue, and enter the WorkOS code. Refresh the page before choosing a password to confirm the session resumes. Set a strong password and confirm the redirect to `/login`. Check in WorkOS that the same invitation was accepted by the verified user. Confirm restricted routes reject that user until an Admin activates the local account, then confirm password sign-in grants the assigned access.
+
+Use the frontend proxy or same-site frontend and backend hosts, and match the frontend origin exactly in `APP_URL`. Configure hosting and observability to omit invitation URL query strings, request bodies and cookies from logs. The app removes the token from the address bar on arrival, but the initial email link necessarily reaches the hosting layer with the token in its query string.
 
 ### Custom sign-in, verification, and password recovery
 
@@ -110,25 +167,13 @@ Session cookies use `SameSite=Lax`, so this setup does not support cross-site fr
 
 ## Activate a user
 
-New users are currently active by default. Existing inactive users cannot access protected endpoints. An authorized operator with private database access should verify the complete WorkOS ID before activating an account:
-
-```sql
-SELECT workos_id, email, is_active FROM users;
-
-UPDATE users
-SET is_active = true, updated_at = now()
-WHERE workos_id = 'user_verified_workos_id'
-RETURNING workos_id, email, is_active;
-```
-
-Copy the complete ID, not a truncated value from a table display. There is no public activation endpoint. A protected request returns `401` without a valid session and `403` for an inactive local account.
+Invited users become active after completing invitation setup. An authorized Admin can reactivate a subsequently deactivated account with `POST /api/admin/users/{id}/activate`. A protected request returns `401` without a valid session and `403` for an inactive local account.
 
 ## API routes
 
 | Route | Purpose | Access |
 | --- | --- | --- |
 | `GET /healthz` | Health check | Public |
-| `POST /auth/signup` | Temporarily create a WorkOS password account | Public; matching `Origin` required |
 | `POST /auth/password` | Sign in with email and password | Public; matching `Origin` required |
 | `POST /auth/verify-email` | Complete an email verification challenge | Public; challenge cookie and matching `Origin` required |
 | `POST /auth/forgot-password` | Request a reset email | Public; matching `Origin` required |
@@ -142,7 +187,7 @@ Copy the complete ID, not a truncated value from a table display. There is no pu
 | `GET /docs` | Swagger UI | Public |
 | `GET /openapi.yaml` | API specification | Public |
 
-For events, the optional `venueId` query parameter filters results and `refresh=true` requests fresh data from Salesforce. The `week` date identifies a week; results cover Monday through Sunday.
+For events, the optional `venueId` query parameter filters results. The `week` date identifies a week; results cover Monday through Sunday. Event responses include only active venues where the user has `schedules.view`. A specified venue requires that permission. Labor summary and target requests require `venueId` and `labor_goals.view` at that venue.
 
 ## Sessions and access
 
@@ -152,7 +197,7 @@ Logout removes the local session and attempts to revoke the WorkOS session, incl
 
 When WorkOS refresh or signing-key retrieval is temporarily unavailable, protected requests return `503` and preserve the local session for a later retry. An explicit `invalid_grant` refresh response returns `401`. Rotated refresh tokens are saved before the replacement access token is verified, but access is denied until verification succeeds.
 
-**Authorization and RBAC are not implemented.** Authenticated active users can request event data for every venue, including by changing the `venueId` filter. Do not use this prototype to protect sensitive production data until authorization is implemented. ADP and scheduling workflows remain under design.
+Event and Labor reads enforce venue permissions. Accounting period reads require an active session. ADP and scheduling workflows remain under design.
 
 ## Salesforce Pub/Sub subscriber
 
@@ -175,12 +220,47 @@ go build ./...
 
 Unit tests mock WorkOS and database calls. A real end-to-end test requires configured PostgreSQL, WorkOS credentials, and a registered redirect URI. Keep credentials in `.env` locally or in your deployment secret manager, never in source control.
 
+Set `RBAC_TEST_DATABASE_URL` to a disposable PostgreSQL database to run the optional integration tests. They create uniquely named temporary schemas, apply migrations there, and remove those schemas after the tests.
+
+### Backend functional tests
+
+Copy the two backend functional test settings from `.env.example` into the
+Git-ignored `.env.test` in the backend repository. Use unquoted values. Point
+`SMOKE_BASE_URL` at a running Go API and set `RBAC_TEST_DATABASE_URL` to a
+disposable PostgreSQL database with permission to create schemas.
+
+```sh
+make test-functional
+```
+
+Run either suite on its own with `make test-smoke` or `make test-regression`.
+Smoke checks API health and signed-out route protection with read-only requests.
+Regression runs the uncached Go suite, applies migrations in temporary schemas,
+and cleans up those schemas after each run. Neither suite starts the Go API or
+React. To override the smoke URL for one run, use
+`make test-functional SMOKE_BASE_URL=https://api-staging.example.test`.
+
 ## Database-backed event synchronization
 
 Weekly and individual event requests use the PostgreSQL event cache when available and fall back to Salesforce. The background Salesforce Pub/Sub subscriber starts with the API and updates the database. Apply migrations before starting the service. Render auto-deploy is disabled; deploy only after migrations succeed.
 
-Migration version 1 creates event tables; version 2 creates authentication tables. The version 2 down migration **deletes all local users and sessions**. Back up the database before rolling back, and only use it when those tables were introduced by version 2.
+Migrations 001 and 002 create the event and authentication tables. Version 003 adds event-sync tracking and matches `dev`. Dev uses versions 004 and 005 for labor goals and venue metadata. Admin migrations 006–010 add RBAC and audit tables, administrative user profiles, security guards, invitations, and onboarding sessions. The version 002 down migration deletes all local users and sessions. Version 008 blocks rollback and protects the audit table with a database dependency.
 
-Older databases that ran the authentication branch's original version 1 instead of `dev`'s version 1 must apply `internal/migrations/001_phase1_tables.up.sql` manually before upgrading. Those databases may already have user tables that predate version 2, so do not run the version 2 down migration on them without a reviewed recovery plan.
+Apply the combined migration sequence to a fresh development database or a database with the dev migrations through 005 and an empty `users` table. Migration 009 requires an invitation ID for every user. Review invitation linkage before upgrading a database that already contains users. Recreate disposable local databases that applied the earlier Admin numbering.
 
-`CREATE TABLE IF NOT EXISTS` does not repair an existing table with a different definition. Inspect unexpected schemas before applying migrations. The version 1 down migration drops event-related tables and their data; do not use it against a database containing data you need.
+Migration 006 preserves audit history and makes assignment IDs, users, roles, and venues immutable through SQL UPDATE. Use the protected Admin assignment removal and creation endpoints to change access. Removing an assignment revokes its grants. Grants from other assignments still apply.
+
+Migration 008 is intentionally irreversible. Its down migration raises an error, and the 006 down script is also blocked by a view dependency on the security history tables. Do not drop that view, use CASCADE, or force the migration version backwards to bypass protection. A database owner can bypass database safeguards and must follow operator access controls.
+
+If rollback of migration 008 is attempted, golang-migrate marks version 7 dirty before the guard raises an error. The version 8 schema remains intact. Stop migrations and inspect the schema and migration version. After confirming the version 008 guard view, immutable-assignment trigger, and audit data are intact, an authorized operator can restore clean version metadata with golang-migrate's `force 8` and resume forward migrations. For any broader recovery, take a verified backup and use a separately reviewed restore plan that preserves all audit records and assignments. Avoid the destructive historical down scripts.
+
+
+### Resource-scoped RBAC
+
+Migration 004 creates the final resource registry, role assignment, and audit tables. It backfills the registry from existing venues without changing venue or event rows. The role and assignment `assignment_type` must match. A global assignment has no resource. A scoped assignment references a registry UUID of the same type. Different resource types can use the same external ID.
+
+Call `HasGlobalPermission` for global operations and `HasResourcePermission` with a registry UUID for scoped operations. Applications provide their authenticated-user and resource resolvers to the middleware. The WedgeWood Admin API still accepts Salesforce `venueId` values and returns its existing venue fields. The permission breakdown returns 404 for unknown venues. For inactive venues it returns false for scoped permissions, while global management permissions are evaluated separately.
+
+The venue-table trigger mirrors inserts and status changes into the registry. Migration 006 sets legacy NULL activity to true and makes the column non-nullable. A suspended venue reopens only when its status is explicitly set to true. A false status suspends access, including global grants when evaluated against that venue, and blocks new assignments. Administrators can inspect and revoke existing assignments while the venue is suspended. Reopening the venue restores access from remaining assignments and keeps the same UUID. The existing Salesforce upserts preserve venue activity on conflict. An external ID reused without a recorded delete still represents the same venue. A hard delete audits direct grants and cascades their removal. Recreating that venue creates a fresh registry UUID.
+
+Apply migrations through 010 before starting the matching release.
