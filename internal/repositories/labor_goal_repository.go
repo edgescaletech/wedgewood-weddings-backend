@@ -235,7 +235,7 @@ func GetEventGuestCountAndCount(ctx context.Context, db *sql.DB, venueID string,
 	query := `
 		SELECT COALESCE(SUM(guest_count), 0), COUNT(*)
 		FROM events
-		WHERE venue_id = $1
+		WHERE venue_id = $1 AND is_active IS NOT FALSE
 		  AND event_date >= $2::date AND event_date <= $3::date;
 	`
 
@@ -399,4 +399,3 @@ func UpsertAccountingPeriod(ctx context.Context, db *sql.DB, p *models.Accountin
 	}
 	return nil
 }
-

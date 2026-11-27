@@ -37,6 +37,7 @@ func TestServerRoutesPreserveAccessBoundaries(t *testing.T) {
 		"/api/events", "/api/events/event_1", "/api/labor-goals/summary",
 		"/api/admin/labor-goals/upload", "/api/admin/accounting-periods/upload",
 		"/api/admin/users", "/auth/access", "/auth/sessions",
+		"/api/venues", "/api/admin/venues-overview", "/api/admin/regions", "/api/labor-goals/targets?year=2027",
 	} {
 		response := httptest.NewRecorder()
 		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))

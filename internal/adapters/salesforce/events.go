@@ -3,6 +3,7 @@ package salesforce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -15,7 +16,6 @@ import (
 // Re-export model types so existing callers remain 100% compatible.
 type QuoteDetails = models.QuoteDetails
 type Event = models.Event
-
 
 // nameRelation captures relationship traversal (e.g. Venue_GM__r.Name, Area__c lookup).
 type nameRelation struct {
@@ -53,6 +53,7 @@ type planningDetailsRelation struct {
 
 // wedgewoodRecord represents custom Wedgewood schema fields.
 type wedgewoodRecord struct {
+	SystemModstamp            string                   `json:"SystemModstamp"`
 	Id                        string                   `json:"Id"`
 	Name                      string                   `json:"Name"`
 	StageName                 string                   `json:"StageName"`
@@ -87,18 +88,19 @@ type wedgewoodRecord struct {
 
 // standardRecord handles standard Salesforce orgs without custom Wedgewood fields.
 type standardRecord struct {
-	Id          string   `json:"Id"`
-	Name        string   `json:"Name"`
-	CloseDate   string   `json:"CloseDate"`
-	StageName   string   `json:"StageName"`
-	Amount      *float64 `json:"Amount"`
-	Description string   `json:"Description"`
-	Type        string   `json:"Type"`
+	SystemModstamp string   `json:"SystemModstamp"`
+	Id             string   `json:"Id"`
+	Name           string   `json:"Name"`
+	CloseDate      string   `json:"CloseDate"`
+	StageName      string   `json:"StageName"`
+	Amount         *float64 `json:"Amount"`
+	Description    string   `json:"Description"`
+	Type           string   `json:"Type"`
 }
 
 const wedgewoodSOQL = `
 SELECT
-  Id,
+  Id, SystemModstamp,
   Name,
   StageName,
   Event_Start_Date_Only__c,
@@ -156,14 +158,14 @@ ORDER BY Event_Start_Date_Only__c ASC
 `
 
 const standardSOQL = `
-SELECT Id, Name, CloseDate, StageName, Amount, Description, Type
+SELECT Id, SystemModstamp, Name, CloseDate, StageName, Amount, Description, Type
 FROM Opportunity
 WHERE CloseDate >= %s AND CloseDate <= %s
 ORDER BY CloseDate ASC
 `
 
 const fallbackSOQL = `
-SELECT Id, Name, CloseDate, StageName, Amount, Description, Type
+SELECT Id, SystemModstamp, Name, CloseDate, StageName, Amount, Description, Type
 FROM Opportunity
 ORDER BY CloseDate DESC
 LIMIT 100
@@ -186,13 +188,17 @@ func GetWeeklyEventsContext(ctx context.Context, c *Client, weekStart, weekEnd t
 		events := make([]Event, 0, len(records))
 		for _, raw := range records {
 			var opp wedgewoodRecord
-			if err := json.Unmarshal(raw, &opp); err == nil {
-				// Filter out Lost or Cancelled in fast Go memory
-				if opp.StageName == "Closed Lost" || opp.StageName == "Cancelled" {
-					continue
-				}
-				events = append(events, toWedgewoodEvent(opp))
+			if err := json.Unmarshal(raw, &opp); err != nil {
+				return nil, fmt.Errorf("decode Salesforce Opportunity: %w", err)
 			}
+			if opp.Id == "" || sourceTimestamp(opp.SystemModstamp).IsZero() {
+				return nil, fmt.Errorf("Opportunity %s missing valid SystemModstamp", opp.Id)
+			}
+			// Preserve the existing scheduling stage filter.
+			if opp.StageName == "Closed Lost" || opp.StageName == "Cancelled" {
+				continue
+			}
+			events = append(events, toWedgewoodEvent(opp))
 		}
 
 		// Fast in-memory sort by date then time
@@ -221,9 +227,13 @@ func GetWeeklyEventsContext(ctx context.Context, c *Client, weekStart, weekEnd t
 	events := make([]Event, 0, len(stdRecords))
 	for _, raw := range stdRecords {
 		var std standardRecord
-		if err := json.Unmarshal(raw, &std); err == nil {
-			events = append(events, toStandardEvent(std))
+		if err := json.Unmarshal(raw, &std); err != nil {
+			return nil, fmt.Errorf("decode Salesforce Opportunity: %w", err)
 		}
+		if std.Id == "" || sourceTimestamp(std.SystemModstamp).IsZero() {
+			return nil, fmt.Errorf("Opportunity %s missing valid SystemModstamp", std.Id)
+		}
+		events = append(events, toStandardEvent(std))
 	}
 	sortEvents(events)
 	return events, nil
@@ -336,6 +346,7 @@ func toWedgewoodEvent(o wedgewoodRecord) Event {
 
 	return Event{
 		ID:                        o.Id,
+		SalesforceModifiedAt:      sourceTimestamp(o.SystemModstamp),
 		Name:                      o.Name,
 		StageName:                 o.StageName,
 		EventDate:                 o.EventStartDateOnly,
@@ -399,19 +410,20 @@ func toStandardEvent(s standardRecord) Event {
 	notes := s.Description
 
 	return Event{
-		ID:          s.Id,
-		Name:        s.Name,
-		StageName:   s.StageName,
-		EventDate:   s.CloseDate,
-		DayOfWeek:   dayOfWeek,
-		StartTime:   "", // not available on standard Opportunity — FE shows "Not set in Salesforce"
-		EndTime:     "", // not available on standard Opportunity — FE shows "Not set in Salesforce"
-		EventType:   eventType,
-		GuestCount:  0,  // not available on standard Opportunity — FE shows "Not set in Salesforce"
-		Venue:       "", // not available on standard Opportunity — FE shows "Not set in Salesforce"
-		HasBar:      false,
-		BarLocation: "",
-		Notes:       notes,
+		ID:                   s.Id,
+		SalesforceModifiedAt: sourceTimestamp(s.SystemModstamp),
+		Name:                 s.Name,
+		StageName:            s.StageName,
+		EventDate:            s.CloseDate,
+		DayOfWeek:            dayOfWeek,
+		StartTime:            "", // not available on standard Opportunity — FE shows "Not set in Salesforce"
+		EndTime:              "", // not available on standard Opportunity — FE shows "Not set in Salesforce"
+		EventType:            eventType,
+		GuestCount:           0,  // not available on standard Opportunity — FE shows "Not set in Salesforce"
+		Venue:                "", // not available on standard Opportunity — FE shows "Not set in Salesforce"
+		HasBar:               false,
+		BarLocation:          "",
+		Notes:                notes,
 	}
 }
 
@@ -757,11 +769,17 @@ WHERE SBQQ__Quote__c IN (%s)
 	}
 }
 
-// GetEventByID fetches a single Opportunity by Salesforce ID and returns it
-// as a fully-enriched Event (same pipeline as GetWeeklyEvents).
+// ErrEventNotFound identifies a record absent from the normal SOQL query.
+var ErrEventNotFound = errors.New("Salesforce event not found")
+
+// GetEventByID fetches one enriched Opportunity using a background context.
 func GetEventByID(c *Client, id string) (*Event, error) {
+	return GetEventByIDContext(context.Background(), c, id)
+}
+
+func GetEventByIDContext(ctx context.Context, c *Client, id string) (*Event, error) {
 	soql := fmt.Sprintf(`SELECT
-  Id, Name, StageName,
+  Id, SystemModstamp, Name, StageName,
   Event_Start_Date_Only__c, Day_of_Week__c,
   Start_Date_Time_Formula__c, End_Date_Time_Formula__c,
   Event_Type_Detail__c, Guest_Count_Formula__c,
@@ -796,12 +814,12 @@ FROM Opportunity
 WHERE Id = '%s'
 LIMIT 1`, id)
 
-	records, err := c.Query(soql)
+	records, err := c.QueryContext(ctx, soql)
 	if err != nil {
 		return nil, fmt.Errorf("SOQL query for event %s: %w", id, err)
 	}
 	if len(records) == 0 {
-		return nil, fmt.Errorf("event %s not found in Salesforce", id)
+		return nil, fmt.Errorf("%w: %s", ErrEventNotFound, id)
 	}
 
 	var opp wedgewoodRecord
@@ -809,10 +827,24 @@ LIMIT 1`, id)
 		return nil, fmt.Errorf("unmarshal event %s: %w", id, err)
 	}
 
+	if opp.Id != id || sourceTimestamp(opp.SystemModstamp).IsZero() {
+		return nil, fmt.Errorf("Opportunity %s missing valid ID or SystemModstamp", id)
+	}
 	evt := toWedgewoodEvent(opp)
 
 	// Enrich with CPQ quote (reuse weekly enrichment on a 1-element slice)
 	events := []Event{evt}
-	enrichEventsWithCPQQuotes(context.Background(), c, events)
+	enrichEventsWithCPQQuotes(ctx, c, events)
 	return &events[0], nil
 }
+
+// Salesforce REST timestamps can use either Z or an offset without a colon.
+func ParseSourceTimestamp(value string) (time.Time, error) {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999-0700"} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid Salesforce SystemModstamp %q", value)
+}
+func sourceTimestamp(value string) time.Time { parsed, _ := ParseSourceTimestamp(value); return parsed }

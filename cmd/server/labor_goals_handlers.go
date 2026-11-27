@@ -54,12 +54,15 @@ func laborGoalsTargetsHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		venueID := r.URL.Query().Get("venueId")
 		region := r.URL.Query().Get("region")
-		yearStr := r.URL.Query().Get("year")
-		year := 2027
-		if yearStr != "" {
-			if parsed, err := strconv.Atoi(yearStr); err == nil && parsed > 0 {
-				year = parsed
-			}
+		yearStr := strings.TrimSpace(r.URL.Query().Get("year"))
+		if yearStr == "" {
+			writeError(w, http.StatusBadRequest, "year is required")
+			return
+		}
+		year, err := strconv.Atoi(yearStr)
+		if err != nil || year < 1 || year > 9999 {
+			writeError(w, http.StatusBadRequest, "invalid year: must be an integer between 1 and 9999")
+			return
 		}
 
 		targets, err := repositories.GetLaborTargets(r.Context(), db, venueID, region, year)
@@ -67,19 +70,23 @@ func laborGoalsTargetsHandler(db *sql.DB) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if targets == nil {
-			targets = []models.LaborEfficiencyTarget{}
+		allowed := eventVenueAccess(r)
+		visible := make([]models.LaborEfficiencyTarget, 0, len(targets))
+		for _, target := range targets {
+			if allowed[target.VenueID] {
+				visible = append(visible, target)
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"venueId": venueID,
 			"region":  region,
 			"year":    year,
-			"targets": targets,
+			"targets": visible,
 		})
 	}
 }
 
-// venuesListHandler returns all active venues for dropdowns and listings.
+// venuesListHandler returns active venues authorized by the venueAccess middleware.
 func venuesListHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		venues, err := repositories.GetAllActiveVenues(r.Context(), db)
@@ -87,12 +94,16 @@ func venuesListHandler(db *sql.DB) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if venues == nil {
-			venues = []models.Venue{}
+		allowed := eventVenueAccess(r)
+		visible := make([]models.Venue, 0, len(venues))
+		for _, venue := range venues {
+			if allowed[venue.ID] {
+				visible = append(visible, venue)
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"venues": venues,
-			"count":  len(venues),
+			"venues": visible,
+			"count":  len(visible),
 		})
 	}
 }
@@ -129,6 +140,7 @@ func accountingPeriodsHandler(db *sql.DB) http.HandlerFunc {
 // laborGoalsUploadHandler handles POST /api/admin/labor-goals/upload.
 //
 // Accepted CSV columns (case-insensitive header matching):
+//
 //	Venue, Month, FOH guests per labor hour, BOH guests per labor hour
 //
 // Optionally a leading "Venue #" / "Venue Number" column is tolerated and
@@ -285,6 +297,20 @@ func processLaborGoalsCSV(ctx context.Context, db *sql.DB, r io.Reader) (*csvUpl
 		region := get("region")
 
 		if venueName == "" || periodKey == "" {
+			result.Skipped++
+			continue
+		}
+
+		// An absent cell is malformed input, not an intentional blank target.
+		// Validate positions before any venue metadata or target writes.
+		var missing []string
+		for _, key := range []string{"foh", "boh"} {
+			if colIdx[key] >= len(record) {
+				missing = append(missing, strings.ToUpper(key))
+			}
+		}
+		if len(missing) > 0 {
+			result.Errors = append(result.Errors, fmt.Sprintf("line %d: missing %s target cells; retain empty CSV cells to clear targets intentionally", lineNum, strings.Join(missing, " and ")))
 			result.Skipped++
 			continue
 		}

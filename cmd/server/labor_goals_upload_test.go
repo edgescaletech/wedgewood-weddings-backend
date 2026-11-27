@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -149,5 +150,55 @@ Boulder Ridge,101,2027-01,Bay Area,,
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet mock expectations: %v", err)
+	}
+}
+
+func TestProcessLaborGoalsCSVRejectsAbsentTargetCellsWithoutWrites(t *testing.T) {
+	for _, row := range []string{"Boulder Ridge,2027-01", "Boulder Ridge,2027-01,", "Boulder Ridge,2027-01,2.5"} {
+		t.Run(row, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			result, err := processLaborGoalsCSV(t.Context(), db, strings.NewReader("Venue,Month,FOH,BOH\n"+row+"\n"))
+			if err != nil || result.Imported != 0 || result.Skipped != 1 || len(result.Errors) != 1 || !strings.Contains(result.Errors[0], "target cells") {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			if err = mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestLaborGoalsTargetsRequiresExplicitYear(t *testing.T) {
+	for _, year := range []string{"", "abc", "0", "-1", "2027.5", "10000"} {
+		t.Run("invalid_"+year, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodGet, "/api/labor-goals/targets?year="+year, nil)
+			laborGoalsTargetsHandler(nil)(w, r)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body)
+			}
+		})
+	}
+	for _, year := range []int{2026, 2027, 2028} {
+		t.Run(strconv.Itoa(year), func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			mock.ExpectQuery("SELECT t.id").WithArgs(year).WillReturnRows(sqlmock.NewRows([]string{"id", "venue_id", "name", "region", "venue_number", "year", "period_key", "foh_target", "boh_target"}))
+			w := httptest.NewRecorder()
+			laborGoalsTargetsHandler(db)(w, httptest.NewRequest(http.MethodGet, "/api/labor-goals/targets?year="+strconv.Itoa(year), nil))
+			if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"year":`+strconv.Itoa(year)) {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body)
+			}
+			if err = mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

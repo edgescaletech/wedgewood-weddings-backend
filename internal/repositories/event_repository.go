@@ -20,8 +20,13 @@ func NewEventRepository(db *sql.DB) *EventRepository {
 	return &EventRepository{db: db}
 }
 
+// EventExecutor allows CDC writes and checkpoints to share one transaction.
+type EventExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
 // UpsertVenue inserts or updates a venue record with optional venue_number, region, and timezone.
-func UpsertVenue(ctx context.Context, db *sql.DB, id, name, propertyName, gm string, opts ...string) error {
+func UpsertVenue(ctx context.Context, db EventExecutor, id, name, propertyName, gm string, opts ...string) error {
 	if id == "" {
 		return nil
 	}
@@ -54,14 +59,20 @@ ON CONFLICT (id) DO UPDATE SET
 }
 
 // UpsertEvent inserts or updates a single event record.
-func UpsertEvent(ctx context.Context, db *sql.DB, evt *models.Event) error {
+func UpsertEvent(ctx context.Context, db EventExecutor, evt *models.Event) error {
 	if evt == nil || evt.ID == "" {
 		return fmt.Errorf("invalid event: missing ID")
 	}
 
+	if evt.SalesforceModifiedAt.IsZero() {
+		return fmt.Errorf("event %s has no Salesforce source version", evt.ID)
+	}
+
 	// Ensure venue exists first to satisfy foreign key constraint
 	if evt.VenueID != "" {
-		_ = UpsertVenue(ctx, db, evt.VenueID, evt.Venue, evt.VenueProperty, evt.VenueGM, evt.VenueNumber, evt.VenueRegion, evt.VenueTimezone)
+		if err := UpsertVenue(ctx, db, evt.VenueID, evt.Venue, evt.VenueProperty, evt.VenueGM, evt.VenueNumber, evt.VenueRegion, evt.VenueTimezone); err != nil {
+			return fmt.Errorf("ensure event venue: %w", err)
+		}
 	}
 
 	var cateringJSON []byte
@@ -84,7 +95,7 @@ INSERT INTO events (
 	has_bar, bar_location, bar_start_time, bar_start_datetime, bar_close_time, bar_close_datetime,
 	bar_last_call_time, bar_last_call_datetime, anticipated_bar_activity, other_bar_notes,
 	beverage_cart_details, signature_drinks, charger_plates, photo_booth, photobooth_staffed,
-	package_name, coordinator_name, dj_name, decor_setup_time, beo_notes, notes, catering_details, updated_at
+	package_name, coordinator_name, dj_name, decor_setup_time, beo_notes, notes, catering_details, salesforce_last_modified_at, is_active, last_synced_at, updated_at
 ) VALUES (
 	$1, $2, $3, $4, $5, $6, $7,
 	$8, $9, $10, $11, $12, $13,
@@ -94,7 +105,7 @@ INSERT INTO events (
 	$24, $25, $26, $27, $28, $29,
 	$30, $31, $32, $33,
 	$34, $35, $36, $37, $38,
-	$39, $40, $41, $42, $43, $44, $45, NOW()
+	$39, $40, $41, $42, $43, $44, $45, $46, TRUE, NOW(), NOW()
 )
 ON CONFLICT (id) DO UPDATE SET
 	venue_id = EXCLUDED.venue_id,
@@ -141,7 +152,13 @@ ON CONFLICT (id) DO UPDATE SET
 	beo_notes = EXCLUDED.beo_notes,
 	notes = EXCLUDED.notes,
 	catering_details = COALESCE(EXCLUDED.catering_details, events.catering_details),
-	updated_at = NOW();`
+ salesforce_last_modified_at = EXCLUDED.salesforce_last_modified_at,
+ is_active = TRUE,
+ last_synced_at = NOW(),
+ updated_at = NOW()
+ WHERE events.salesforce_last_modified_at IS NULL
+    OR EXCLUDED.salesforce_last_modified_at > events.salesforce_last_modified_at
+    OR (EXCLUDED.salesforce_last_modified_at = events.salesforce_last_modified_at AND events.is_active IS NOT FALSE);`
 
 	var venueIDParam *string
 	if evt.VenueID != "" {
@@ -162,17 +179,27 @@ ON CONFLICT (id) DO UPDATE SET
 		evt.HasBar, evt.BarLocation, evt.BarStartTime, evt.BarStartDateTime, evt.BarCloseTime, evt.BarCloseDateTime,
 		evt.BarLastCallTime, evt.BarLastCallDateTime, evt.AnticipatedBarActivity, evt.OtherBarNotes,
 		evt.BeverageCartDetails, evt.SignatureDrinks, evt.ChargerPlates, evt.PhotoBooth, evt.PhotoboothStaffed,
-		evt.Package, evt.Coordinator, evt.DJName, evt.DecorSetupTime, evt.BEONotes, evt.Notes, cateringParam,
+		evt.Package, evt.Coordinator, evt.DJName, evt.DecorSetupTime, evt.BEONotes, evt.Notes, cateringParam, evt.SalesforceModifiedAt,
 	)
 	return err
 }
 
+// EventTransactionStarter permits transactions on a DB or a lock-owning connection.
+type EventTransactionStarter interface {
+	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+}
+
 // UpsertEvents writes a batch of events inside a single transaction.
-func UpsertEvents(ctx context.Context, db *sql.DB, evts []models.Event) error {
+func UpsertEvents(ctx context.Context, db EventTransactionStarter, evts []models.Event) error {
 	if len(evts) == 0 {
 		return nil
 	}
 
+	for _, evt := range evts {
+		if evt.ID == "" || evt.SalesforceModifiedAt.IsZero() {
+			return fmt.Errorf("event %s has no Salesforce source version", evt.ID)
+		}
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -225,7 +252,7 @@ INSERT INTO events (
 	has_bar, bar_location, bar_start_time, bar_start_datetime, bar_close_time, bar_close_datetime,
 	bar_last_call_time, bar_last_call_datetime, anticipated_bar_activity, other_bar_notes,
 	beverage_cart_details, signature_drinks, charger_plates, photo_booth, photobooth_staffed,
-	package_name, coordinator_name, dj_name, decor_setup_time, beo_notes, notes, catering_details, updated_at
+	package_name, coordinator_name, dj_name, decor_setup_time, beo_notes, notes, catering_details, salesforce_last_modified_at, is_active, last_synced_at, updated_at
 ) VALUES (
 	$1, $2, $3, $4, $5, $6, $7,
 	$8, $9, $10, $11, $12, $13,
@@ -235,7 +262,7 @@ INSERT INTO events (
 	$24, $25, $26, $27, $28, $29,
 	$30, $31, $32, $33,
 	$34, $35, $36, $37, $38,
-	$39, $40, $41, $42, $43, $44, $45, NOW()
+	$39, $40, $41, $42, $43, $44, $45, $46, TRUE, NOW(), NOW()
 )
 ON CONFLICT (id) DO UPDATE SET
 	venue_id = EXCLUDED.venue_id,
@@ -282,7 +309,13 @@ ON CONFLICT (id) DO UPDATE SET
 	beo_notes = EXCLUDED.beo_notes,
 	notes = EXCLUDED.notes,
 	catering_details = COALESCE(EXCLUDED.catering_details, events.catering_details),
-	updated_at = NOW();`)
+ salesforce_last_modified_at = EXCLUDED.salesforce_last_modified_at,
+ is_active = TRUE,
+ last_synced_at = NOW(),
+ updated_at = NOW()
+ WHERE events.salesforce_last_modified_at IS NULL
+    OR EXCLUDED.salesforce_last_modified_at > events.salesforce_last_modified_at
+    OR (EXCLUDED.salesforce_last_modified_at = events.salesforce_last_modified_at AND events.is_active IS NOT FALSE);`)
 	if err != nil {
 		return err
 	}
@@ -318,7 +351,7 @@ ON CONFLICT (id) DO UPDATE SET
 			evt.HasBar, evt.BarLocation, evt.BarStartTime, evt.BarStartDateTime, evt.BarCloseTime, evt.BarCloseDateTime,
 			evt.BarLastCallTime, evt.BarLastCallDateTime, evt.AnticipatedBarActivity, evt.OtherBarNotes,
 			evt.BeverageCartDetails, evt.SignatureDrinks, evt.ChargerPlates, evt.PhotoBooth, evt.PhotoboothStaffed,
-			evt.Package, evt.Coordinator, evt.DJName, evt.DecorSetupTime, evt.BEONotes, evt.Notes, cateringParam,
+			evt.Package, evt.Coordinator, evt.DJName, evt.DecorSetupTime, evt.BEONotes, evt.Notes, cateringParam, evt.SalesforceModifiedAt,
 		)
 		if err != nil {
 			return fmt.Errorf("upsert event %s: %w", evt.ID, err)
@@ -433,7 +466,7 @@ func GetEventsByWeek(ctx context.Context, db *sql.DB, weekStart, weekEnd time.Ti
 			SELECT %s
 			FROM events
 			LEFT JOIN venues v ON v.id = events.venue_id
-			WHERE events.event_date >= $1 AND events.event_date <= $2 AND events.venue_id = $3
+			WHERE events.is_active IS NOT FALSE AND events.event_date >= $1 AND events.event_date <= $2 AND events.venue_id = $3
 			  AND events.stage_name NOT IN ('Closed Lost', 'Cancelled')
 			ORDER BY events.event_date ASC, events.start_time ASC`, selectEventColumns)
 		args = []any{weekStart.Format("2006-01-02"), weekEnd.Format("2006-01-02"), venueID}
@@ -442,7 +475,7 @@ func GetEventsByWeek(ctx context.Context, db *sql.DB, weekStart, weekEnd time.Ti
 			SELECT %s
 			FROM events
 			LEFT JOIN venues v ON v.id = events.venue_id
-			WHERE events.event_date >= $1 AND events.event_date <= $2
+			WHERE events.is_active IS NOT FALSE AND events.event_date >= $1 AND events.event_date <= $2
 			  AND events.stage_name NOT IN ('Closed Lost', 'Cancelled')
 			ORDER BY events.event_date ASC, events.start_time ASC`, selectEventColumns)
 		args = []any{weekStart.Format("2006-01-02"), weekEnd.Format("2006-01-02")}
@@ -472,7 +505,7 @@ func GetEventByID(ctx context.Context, db *sql.DB, id string) (*models.Event, er
 		SELECT %s
 		FROM events
 		LEFT JOIN venues v ON v.id = events.venue_id
-		WHERE events.id = $1
+		WHERE events.id = $1 AND events.is_active IS NOT FALSE
 		LIMIT 1`, selectEventColumns)
 
 	rows, err := db.QueryContext(ctx, query, id)
@@ -495,7 +528,7 @@ func GetEventByID(ctx context.Context, db *sql.DB, id string) (*models.Event, er
 // HasEventsForWeek checks if database already contains records for the requested date window.
 func HasEventsForWeek(ctx context.Context, db *sql.DB, weekStart, weekEnd time.Time) (bool, error) {
 	var count int
-	query := `SELECT COUNT(*) FROM events WHERE event_date >= $1 AND event_date <= $2`
+	query := `SELECT COUNT(*) FROM events WHERE is_active IS NOT FALSE AND event_date >= $1 AND event_date <= $2`
 	err := db.QueryRowContext(ctx, query, weekStart.Format("2006-01-02"), weekEnd.Format("2006-01-02")).Scan(&count)
 	if err != nil {
 		return false, err
@@ -549,5 +582,21 @@ ON CONFLICT (source_system, subscription_key) DO UPDATE SET
 	last_error = $3,
 	updated_at = NOW();`
 	_, err := db.ExecContext(ctx, query, sourceSystem, subscriptionKey, syncErr.Error())
+	return err
+}
+
+// MarkEventDeleted preserves a source-versioned tombstone even if the event was
+// never cached. Older snapshots cannot resurrect it; a newer undelete can.
+func MarkEventDeleted(ctx context.Context, exec EventExecutor, id string, version time.Time) error {
+	if id == "" || version.IsZero() {
+		return fmt.Errorf("deletion missing record ID or source version")
+	}
+	_, err := exec.ExecContext(ctx, `INSERT INTO events
+ (id,name,event_date,is_active,salesforce_last_modified_at,last_synced_at,updated_at)
+ VALUES ($1,'Deleted Salesforce event',DATE '1970-01-01',FALSE,$2,NOW(),NOW())
+ ON CONFLICT (id) DO UPDATE SET is_active=FALSE,
+ salesforce_last_modified_at=EXCLUDED.salesforce_last_modified_at,last_synced_at=NOW(),updated_at=NOW()
+ WHERE events.salesforce_last_modified_at IS NULL
+ OR EXCLUDED.salesforce_last_modified_at >= events.salesforce_last_modified_at`, id, version)
 	return err
 }

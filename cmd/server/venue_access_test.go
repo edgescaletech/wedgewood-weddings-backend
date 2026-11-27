@@ -138,7 +138,7 @@ func TestVenueAuthorizationIntegration(t *testing.T) {
 func TestSalesforceFallbackFiltersVenues(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"totalSize":2,"done":true,"records":[{"Id":"event-a","Name":"Allowed","Venue__c":"a","Event_Start_Date_Only__c":"2026-11-17","StageName":"Booked"},{"Id":"event-b","Name":"Denied","Venue__c":"b","Event_Start_Date_Only__c":"2026-11-17","StageName":"Booked"}]}`))
+		_, _ = w.Write([]byte(`{"totalSize":2,"done":true,"records":[{"Id":"event-a","Name":"Allowed","Venue__c":"a","Event_Start_Date_Only__c":"2026-11-17","SystemModstamp":"2026-11-17T01:00:00.000+0000","StageName":"Booked"},{"Id":"event-b","Name":"Denied","Venue__c":"b","Event_Start_Date_Only__c":"2026-11-17","SystemModstamp":"2026-11-17T01:00:00.000+0000","StageName":"Booked"}]}`))
 	}))
 	defer upstream.Close()
 	client, err := salesforce.NewClient(salesforce.Config{MyDomainURL: upstream.URL, AccessToken: "test"})
@@ -205,6 +205,9 @@ func TestSalesforceEventDetailFallbackEnforcesVenueAccess(t *testing.T) {
 		WithArgs(eventID).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 
+	mock.ExpectQuery("SELECT pg_try_advisory_lock_shared").WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(true))
+	mock.ExpectQuery("SELECT pg_advisory_unlock_shared").WillReturnRows(sqlmock.NewRows([]string{"unlocked"}).AddRow(true))
+
 	var lookups atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query().Get("q")
@@ -219,7 +222,7 @@ func TestSalesforceEventDetailFallbackEnforcesVenueAccess(t *testing.T) {
 			return
 		}
 		lookups.Add(1)
-		_, _ = w.Write([]byte(`{"totalSize":1,"done":true,"records":[{"Id":"` + eventID + `","Name":"Private Venue B event","Venue__c":"b","Event_Start_Date_Only__c":"2026-11-17","StageName":"Booked"}]}`))
+		_, _ = w.Write([]byte(`{"totalSize":1,"done":true,"records":[{"Id":"` + eventID + `","Name":"Private Venue B event","Venue__c":"b","Event_Start_Date_Only__c":"2026-11-17","SystemModstamp":"2026-11-17T01:00:00.000+0000","StageName":"Booked"}]}`))
 	}))
 	defer upstream.Close()
 	client, err := salesforce.NewClient(salesforce.Config{MyDomainURL: upstream.URL, AccessToken: "test"})

@@ -94,6 +94,7 @@ func (w *EventSyncWorker) SyncWeek(ctx context.Context, weekStart, weekEnd time.
 		return ctx.Err()
 	}
 
+	var syncConn *sql.Conn
 	// Multi-instance distributed coordination: acquire PostgreSQL advisory lock for this week
 	if w.db != nil {
 		conn, err := w.db.Conn(ctx)
@@ -101,6 +102,7 @@ func (w *EventSyncWorker) SyncWeek(ctx context.Context, weekStart, weekEnd time.
 			return fmt.Errorf("checkout db connection for sync lock: %w", err)
 		}
 
+		syncConn = conn
 		lockKey := fmt.Sprintf("sf_sync_%s", key)
 		var acquired bool
 		var waited bool
@@ -168,40 +170,46 @@ func (w *EventSyncWorker) SyncWeek(ctx context.Context, weekStart, weekEnd time.
 		}
 	}
 
-	if err := repositories.RecordSyncAttempt(ctx, w.db, "salesforce", subscriptionKey); err != nil {
-		log.Printf("[AsyncSync WARNING] Failed to record sync attempt: %v", err)
+	if syncConn == nil {
+		return fmt.Errorf("event sync database is not configured")
 	}
+	return database.WithEventCacheGate(ctx, syncConn, false, func() error {
 
-	t0 := time.Now()
-	log.Printf("[AsyncSync] Background job starting for week %s to %s...", key, weekEnd.Format("2006-01-02"))
-
-	events, err := salesforce.GetWeeklyEventsContext(ctx, w.sf, weekStart, weekEnd)
-	if err != nil {
-		if recErr := repositories.RecordSyncResult(ctx, w.db, "salesforce", subscriptionKey, err); recErr != nil {
-			log.Printf("[AsyncSync WARNING] Failed to record sync error result: %v", recErr)
+		if err := repositories.RecordSyncAttempt(ctx, w.db, "salesforce", subscriptionKey); err != nil {
+			log.Printf("[AsyncSync WARNING] Failed to record sync attempt: %v", err)
 		}
-		return fmt.Errorf("salesforce fetch: %w", err)
-	}
 
-	fetchDuration := time.Since(t0).Round(time.Millisecond)
-	log.Printf("[AsyncSync] Fetched %d events from Salesforce in %s. Upserting to PostgreSQL...", len(events), fetchDuration)
+		t0 := time.Now()
+		log.Printf("[AsyncSync] Background job starting for week %s to %s...", key, weekEnd.Format("2006-01-02"))
 
-	tSave := time.Now()
-	if err := repositories.UpsertEvents(ctx, w.db, events); err != nil {
-		if recErr := repositories.RecordSyncResult(ctx, w.db, "salesforce", subscriptionKey, err); recErr != nil {
-			log.Printf("[AsyncSync WARNING] Failed to record sync error result: %v", recErr)
+		events, err := salesforce.GetWeeklyEventsContext(ctx, w.sf, weekStart, weekEnd)
+		if err != nil {
+			if recErr := repositories.RecordSyncResult(ctx, w.db, "salesforce", subscriptionKey, err); recErr != nil {
+				log.Printf("[AsyncSync WARNING] Failed to record sync error result: %v", recErr)
+			}
+			return fmt.Errorf("salesforce fetch: %w", err)
 		}
-		return fmt.Errorf("upsert events: %w", err)
-	}
 
-	saveDuration := time.Since(tSave).Round(time.Millisecond)
-	if recErr := repositories.RecordSyncResult(ctx, w.db, "salesforce", subscriptionKey, nil); recErr != nil {
-		log.Printf("[AsyncSync WARNING] Failed to record sync success result: %v", recErr)
-	}
+		fetchDuration := time.Since(t0).Round(time.Millisecond)
+		log.Printf("[AsyncSync] Fetched %d events from Salesforce in %s. Upserting to PostgreSQL...", len(events), fetchDuration)
 
-	log.Printf("[AsyncSync SUCCESS] Synchronized %d events for week %s in %s (total: %s)",
-		len(events), key, saveDuration, time.Since(t0).Round(time.Millisecond))
-	return nil
+		tSave := time.Now()
+		if err := repositories.UpsertEvents(ctx, syncConn, events); err != nil {
+			if recErr := repositories.RecordSyncResult(ctx, w.db, "salesforce", subscriptionKey, err); recErr != nil {
+				log.Printf("[AsyncSync WARNING] Failed to record sync error result: %v", recErr)
+			}
+			return fmt.Errorf("upsert events: %w", err)
+		}
+
+		saveDuration := time.Since(tSave).Round(time.Millisecond)
+		if recErr := repositories.RecordSyncResult(ctx, w.db, "salesforce", subscriptionKey, nil); recErr != nil {
+			log.Printf("[AsyncSync WARNING] Failed to record sync success result: %v", recErr)
+		}
+
+		log.Printf("[AsyncSync SUCCESS] Synchronized %d events for week %s in %s (total: %s)",
+			len(events), key, saveDuration, time.Since(t0).Round(time.Millisecond))
+		return nil
+	})
 }
 
 // StartScheduledSync begins a periodic background sweep (e.g. hourly or nightly)

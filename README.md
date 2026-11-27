@@ -209,6 +209,17 @@ go run ./cmd/pubsub/
 
 It listens for Salesforce change events and prints them; it does not invalidate the HTTP event cache.
 
+The HTTP API starts its own database-backed CDC subscriber. Only the instance holding the PostgreSQL leader lock consumes changes. It stores replay checkpoints per Salesforce organization and topic in `integration_sync_state`, using the existing migrations 001 and 003. Event mutations, audit entries, and checkpoints commit together on the leader connection. Failed processing leaves the checkpoint unchanged.
+
+The subscriber resumes from the stored replay ID. On first startup, a rejected replay ID, or a CDC gap event, it establishes a live stream anchor before reconciling all cached active-event weeks and the upcoming scheduling window. The window follows `SF_TO_DB_SYNC_WEEKS_AHEAD` (or `SYNC_WEEKS_AHEAD`), defaulting to four weeks. Recovery takes an exclusive cache coordination lock before scanning; normal scheduled and single-event cache writers hold its shared counterpart across their complete fetch and write. This lets in-flight writes finish before the scan and delays new fetches until recovery finishes. The single-event cache fill now completes within the request while holding that lock. Recovery applies the buffered response after reconciliation, then resumes normal consumption. Salesforce retains later stream messages while the snapshot runs; no unbounded in-memory buffer is used.
+
+Deletions retain inactive, source-versioned event records rather than physically removing them. Both single and batch cache writes use Salesforce `SystemModstamp` so an older fetch cannot restore a deletion. Only a newer source version can reactivate the record. Event reads and labor guest totals exclude inactive records. All application instances must run this version before relying on this protection; an older binary does not enforce the write guards.
+
+Recovery requires complete Salesforce query results and explicit deletion confirmation through `queryAll`. If a cached record is absent there, recovery stops and logs its ID: investigate a hard deletion or Salesforce visibility change before resuming. It does not infer deletion from missing results. Recovery covers the cached scheduling scope, not the organization's entire uncached history. Do not remove checkpoints or deletion markers as routine cleanup.
+
+To run CDC integration tests, set `CDC_TEST_DATABASE_URL` to a disposable PostgreSQL database and run `go test ./internal/pubsub`. Tests create and remove isolated schemas, and one test terminates its own test connection to verify leader failure handling. No Salesforce credentials are used by these tests.
+
+
 ## Development checks
 
 ```sh
