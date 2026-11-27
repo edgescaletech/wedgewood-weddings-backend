@@ -160,14 +160,49 @@ func TestSalesforceFallbackFiltersVenues(t *testing.T) {
 	}
 }
 
+func TestEventDetailSkipsSalesforceForMalformedIDs(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("malformed event ID reached Salesforce")
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer upstream.Close()
+	client, err := salesforce.NewClient(salesforce.Config{MyDomainURL: upstream.URL, AccessToken: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{"e2e-missing-2d4b3e1b-b103-437f-8f68-b2b875e75abe", "00600000000000", "00600000000000-"} {
+		mock.ExpectQuery(`FROM events\s+LEFT JOIN venues.*\s+WHERE events.id = \$1`).
+			WithArgs(id).
+			WillReturnRows(sqlmock.NewRows([]string{"id"}))
+		request := httptest.NewRequest(http.MethodGet, "/api/events/"+id, nil)
+		request = request.WithContext(context.WithValue(request.Context(), venueAccessKey{}, map[string]bool{"a": true}))
+		response := httptest.NewRecorder()
+		eventByIDHandler(db, client)(response, request)
+		if response.Code != http.StatusNotFound || response.Body.String() != "{\"error\":\"event not found\"}\n" {
+			t.Errorf("event detail for %q: %d %s", id, response.Code, response.Body)
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSalesforceEventDetailFallbackEnforcesVenueAccess(t *testing.T) {
+	const eventID = "006000000000001AAA"
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 	mock.ExpectQuery(`FROM events\s+LEFT JOIN venues.*\s+WHERE events.id = \$1`).
-		WithArgs("event-b").
+		WithArgs(eventID).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 
 	var lookups atomic.Int32
@@ -178,13 +213,13 @@ func TestSalesforceEventDetailFallbackEnforcesVenueAccess(t *testing.T) {
 			_, _ = w.Write([]byte(`{"totalSize":0,"done":true,"records":[]}`))
 			return
 		}
-		if !strings.Contains(query, "WHERE Id = 'event-b'") {
+		if !strings.Contains(query, "WHERE Id = '"+eventID+"'") {
 			t.Error("Salesforce did not receive the expected event detail query")
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 		lookups.Add(1)
-		_, _ = w.Write([]byte(`{"totalSize":1,"done":true,"records":[{"Id":"event-b","Name":"Private Venue B event","Venue__c":"b","Event_Start_Date_Only__c":"2026-11-17","StageName":"Booked"}]}`))
+		_, _ = w.Write([]byte(`{"totalSize":1,"done":true,"records":[{"Id":"` + eventID + `","Name":"Private Venue B event","Venue__c":"b","Event_Start_Date_Only__c":"2026-11-17","StageName":"Booked"}]}`))
 	}))
 	defer upstream.Close()
 	client, err := salesforce.NewClient(salesforce.Config{MyDomainURL: upstream.URL, AccessToken: "test"})
@@ -193,7 +228,7 @@ func TestSalesforceEventDetailFallbackEnforcesVenueAccess(t *testing.T) {
 	}
 
 	requestForVenue := func(venueID string) *http.Request {
-		request := httptest.NewRequest(http.MethodGet, "/api/events/event-b", nil)
+		request := httptest.NewRequest(http.MethodGet, "/api/events/"+eventID, nil)
 		return request.WithContext(context.WithValue(request.Context(), venueAccessKey{}, map[string]bool{venueID: true}))
 	}
 	denied := httptest.NewRecorder()
@@ -217,7 +252,7 @@ func TestSalesforceEventDetailFallbackEnforcesVenueAccess(t *testing.T) {
 		VenueID string `json:"venueId"`
 	}
 	if err := json.Unmarshal(allowed.Body.Bytes(), &event); err != nil || allowed.Code != http.StatusOK ||
-		event.ID != "event-b" || event.Name != "Private Venue B event" || event.VenueID != "b" {
+		event.ID != eventID || event.Name != "Private Venue B event" || event.VenueID != "b" {
 		t.Fatalf("authorized Salesforce event detail: %d %s (%v)", allowed.Code, allowed.Body, err)
 	}
 }

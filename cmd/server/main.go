@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -265,6 +266,8 @@ func syncEventsHandler(syncWorker *jobs.EventSyncWorker) http.HandlerFunc {
 	}
 }
 
+var salesforceEventIDPattern = regexp.MustCompile(`^[A-Za-z0-9]{15}([A-Za-z0-9]{3})?$`)
+
 // eventByIDHandler handles GET /api/events/{id}
 // Returns a single fully-enriched event JSON object, loading from PostgreSQL (<1ms).
 func eventByIDHandler(db *sql.DB, sf *salesforce.Client) http.HandlerFunc {
@@ -300,6 +303,11 @@ func eventByIDHandler(db *sql.DB, sf *salesforce.Client) http.HandlerFunc {
 		}
 
 		// 2. Fallback to Salesforce
+		if !salesforceEventIDPattern.MatchString(id) {
+			writeError(w, http.StatusNotFound, "event not found")
+			return
+		}
+
 		log.Printf("[DB MISS] Fetching single event %s from Salesforce...", id)
 		evt, err := salesforce.GetEventByID(sf, id)
 		if err != nil {

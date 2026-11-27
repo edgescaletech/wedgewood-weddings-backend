@@ -222,6 +222,24 @@ Unit tests mock WorkOS and database calls. A real end-to-end test requires confi
 
 Set `RBAC_TEST_DATABASE_URL` to a disposable PostgreSQL database to run the optional integration tests. They create uniquely named temporary schemas, apply migrations there, and remove those schemas after the tests.
 
+### Backend functional tests
+
+Copy the two backend functional test settings from `.env.example` into the
+Git-ignored `.env.test` in the backend repository. Use unquoted values. Point
+`SMOKE_BASE_URL` at a running Go API and set `RBAC_TEST_DATABASE_URL` to a
+disposable PostgreSQL database with permission to create schemas.
+
+```sh
+make test-functional
+```
+
+Run either suite on its own with `make test-smoke` or `make test-regression`.
+Smoke checks API health and signed-out route protection with read-only requests.
+Regression runs the uncached Go suite, applies migrations in temporary schemas,
+and cleans up those schemas after each run. Neither suite starts the Go API or
+React. To override the smoke URL for one run, use
+`make test-functional SMOKE_BASE_URL=https://api-staging.example.test`.
+
 ## Database-backed event synchronization
 
 Weekly and individual event requests use the PostgreSQL event cache when available and fall back to Salesforce. The background Salesforce Pub/Sub subscriber starts with the API and updates the database. Apply migrations before starting the service. Render auto-deploy is disabled; deploy only after migrations succeed.
