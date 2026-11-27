@@ -9,7 +9,9 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	goavro "github.com/linkedin/goavro/v2"
@@ -18,15 +20,31 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	"wedding-project/internal/adapters/salesforce"
+	"wedding-project/internal/database"
 	"wedding-project/internal/repositories"
 	proto "wedding-project/proto"
 )
 
-const (
-	pubsubEndpoint = "api.pubsub.salesforce.com:7443"
-	topicName      = "/data/ChangeEvents"
-	numRequested   = int32(10)
-)
+var schemaCache sync.Map // map[schemaID]*goavro.Codec (in-memory schema cache)
+
+const numRequested = int32(10)
+
+// pubsubEndpoint and topicName are read from env at startup so they can be
+// overridden per environment (e.g. sandbox vs production) without code changes.
+// Defaults match the standard Salesforce Pub/Sub API values.
+func pubsubEndpoint() string {
+	if v := os.Getenv("SF_PUBSUB_ENDPOINT"); v != "" {
+		return v
+	}
+	return "api.pubsub.salesforce.com:7443"
+}
+
+func pubsubTopic() string {
+	if v := os.Getenv("SF_PUBSUB_TOPIC"); v != "" {
+		return v
+	}
+	return "/data/ChangeEvents"
+}
 
 type sfOAuthResponse struct {
 	AccessToken string `json:"access_token"`
@@ -114,6 +132,41 @@ func StartBackgroundSubscriber(ctx context.Context, db *sql.DB, sf *salesforce.C
 }
 
 func runSubscriberSession(ctx context.Context, db *sql.DB, sf *salesforce.Client, domainURL, clientID, clientSecret string) error {
+	// ── 1. Multi-instance Active-Passive Leader Election ────────────────────
+	// Only one instance acts as the active CDC stream listener.
+	// All other instances sit on hot standby and take over if the leader dies.
+	if db != nil {
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return fmt.Errorf("checkout db connection for leader lock: %w", err)
+		}
+
+		var isLeader bool
+		if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock(hashtext('sf_pubsub_cdc_leader'))").Scan(&isLeader); err != nil {
+			database.DiscardBadConn(conn)
+			return fmt.Errorf("query leader advisory lock: %w", err)
+		} else if !isLeader {
+			_ = conn.Close()
+			log.Println("[PubSub CDC] Another instance is currently the active CDC listener. Standing by as backup...")
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(15 * time.Second):
+				return nil // Check again in 15 seconds to see if leader is still alive
+			}
+		}
+
+		defer func() {
+			if isLeader {
+				database.ReleaseAdvisoryLock(conn, "SELECT pg_advisory_unlock(hashtext('sf_pubsub_cdc_leader'))", "")
+				log.Println("[PubSub CDC] Released active leader lock.")
+			} else {
+				_ = conn.Close()
+			}
+		}()
+		log.Println("[PubSub CDC] 👑 Promoted to ACTIVE LEADER. Connecting to Salesforce Pub/Sub stream...")
+	}
+
 	log.Println("[PubSub CDC] Authenticating with Salesforce...")
 	tokenResp, err := authenticate(domainURL, clientID, clientSecret)
 	if err != nil {
@@ -126,7 +179,7 @@ func runSubscriberSession(ctx context.Context, db *sql.DB, sf *salesforce.Client
 	}
 
 	tlsCreds := credentials.NewClientTLSFromCert(nil, "")
-	conn, err := grpc.NewClient(pubsubEndpoint, grpc.WithTransportCredentials(tlsCreds))
+	conn, err := grpc.NewClient(pubsubEndpoint(), grpc.WithTransportCredentials(tlsCreds))
 	if err != nil {
 		return fmt.Errorf("grpc connection: %w", err)
 	}
@@ -146,7 +199,7 @@ func runSubscriberSession(ctx context.Context, db *sql.DB, sf *salesforce.Client
 	}
 
 	err = stream.Send(&proto.FetchRequest{
-		TopicName:    topicName,
+		TopicName:    pubsubTopic(),
 		ReplayPreset: proto.ReplayPreset_LATEST,
 		NumRequested: numRequested,
 	})
@@ -154,7 +207,7 @@ func runSubscriberSession(ctx context.Context, db *sql.DB, sf *salesforce.Client
 		return fmt.Errorf("send initial fetch: %w", err)
 	}
 
-	log.Printf("[PubSub CDC] Subscribed to %s. Listening for real-time changes...", topicName)
+	log.Printf("[PubSub CDC] Subscribed to %s. Listening for real-time changes...", pubsubTopic())
 
 	for {
 		select {
@@ -179,16 +232,25 @@ func runSubscriberSession(ctx context.Context, db *sql.DB, sf *salesforce.Client
 			schemaID := event.GetEvent().GetSchemaId()
 			payload := event.GetEvent().GetPayload()
 
-			schemaResp, err := pubSubClient.GetSchema(streamCtx, &proto.SchemaRequest{SchemaId: schemaID})
-			if err != nil {
-				log.Printf("[PubSub CDC] Schema fetch error: %v", err)
-				continue
-			}
+			// ── 2. In-Memory Schema Caching ──────────────────────────────────
+			// Avoid making a gRPC network call to Salesforce on every single event!
+			var codec *goavro.Codec
+			if cached, ok := schemaCache.Load(schemaID); ok {
+				codec = cached.(*goavro.Codec)
+			} else {
+				schemaResp, err := pubSubClient.GetSchema(streamCtx, &proto.SchemaRequest{SchemaId: schemaID})
+				if err != nil {
+					log.Printf("[PubSub CDC] Schema fetch error: %v", err)
+					continue
+				}
 
-			codec, err := goavro.NewCodec(schemaResp.GetSchemaJson())
-			if err != nil {
-				log.Printf("[PubSub CDC] Avro codec error: %v", err)
-				continue
+				c, err := goavro.NewCodec(schemaResp.GetSchemaJson())
+				if err != nil {
+					log.Printf("[PubSub CDC] Avro codec error: %v", err)
+					continue
+				}
+				schemaCache.Store(schemaID, c)
+				codec = c
 			}
 
 			native, _, err := codec.NativeFromBinary(payload)

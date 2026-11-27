@@ -103,7 +103,7 @@ func GetLaborTarget(ctx context.Context, db *sql.DB, venueID, periodKey string) 
 	}
 
 	query := `
-		SELECT id, venue_id, COALESCE(venue_number, ''), year, period_key, basis, foh_target, boh_target
+		SELECT id, venue_id, COALESCE(venue_number, ''), year, period_key, foh_target, boh_target
 		FROM labor_efficiency_targets
 		WHERE venue_id = $1 AND period_key = $2
 		LIMIT 1;
@@ -116,7 +116,6 @@ func GetLaborTarget(ctx context.Context, db *sql.DB, venueID, periodKey string) 
 		&t.VenueNumber,
 		&t.Year,
 		&t.PeriodKey,
-		&t.Basis,
 		&t.FOHTarget,
 		&t.BOHTarget,
 	)
@@ -130,22 +129,46 @@ func GetLaborTarget(ctx context.Context, db *sql.DB, venueID, periodKey string) 
 	return &t, nil
 }
 
-// GetLaborTargetsByVenueAndYear returns all targets for a venue in a given year.
-func GetLaborTargetsByVenueAndYear(ctx context.Context, db *sql.DB, venueID string, year int) ([]models.LaborEfficiencyTarget, error) {
+// GetLaborTargets returns targets with venue metadata, optionally filtered by venueID and region.
+func GetLaborTargets(ctx context.Context, db *sql.DB, venueID, region string, year int) ([]models.LaborEfficiencyTarget, error) {
 	if db == nil {
 		return nil, fmt.Errorf("database connection is nil")
 	}
 
 	query := `
-		SELECT id, venue_id, COALESCE(venue_number, ''), year, period_key, basis, foh_target, boh_target
-		FROM labor_efficiency_targets
-		WHERE venue_id = $1 AND year = $2
-		ORDER BY period_key ASC;
+		SELECT
+			t.id, t.venue_id, COALESCE(v.name, ''), COALESCE(v.region, ''),
+			COALESCE(t.venue_number, v.venue_number, ''), t.year, t.period_key,
+			t.foh_target, t.boh_target
+		FROM labor_efficiency_targets t
+		LEFT JOIN venues v ON v.id = t.venue_id
+		WHERE t.year = $1
 	`
+	args := []any{year}
+	argIdx := 2
 
-	rows, err := db.QueryContext(ctx, query, venueID, year)
+	if venueID != "" && venueID != "all" {
+		query += fmt.Sprintf(" AND t.venue_id = $%d", argIdx)
+		args = append(args, venueID)
+		argIdx++
+	}
+
+	cleanRegion := strings.TrimSpace(region)
+	if cleanRegion != "" && !strings.EqualFold(cleanRegion, "all") && !strings.EqualFold(cleanRegion, "all regions") {
+		if strings.EqualFold(cleanRegion, "ungrouped") {
+			query += " AND (v.region IS NULL OR TRIM(v.region) = '')"
+		} else {
+			query += fmt.Sprintf(" AND TRIM(v.region) = $%d", argIdx)
+			args = append(args, cleanRegion)
+			argIdx++
+		}
+	}
+
+	query += " ORDER BY v.region ASC, v.name ASC, t.period_key ASC;"
+
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("get labor targets for venue %s year %d: %w", venueID, year, err)
+		return nil, fmt.Errorf("get labor targets (year %d, venue %s, region %s): %w", year, venueID, region, err)
 	}
 	defer rows.Close()
 
@@ -155,10 +178,11 @@ func GetLaborTargetsByVenueAndYear(ctx context.Context, db *sql.DB, venueID stri
 		if err := rows.Scan(
 			&t.ID,
 			&t.VenueID,
+			&t.VenueName,
+			&t.Region,
 			&t.VenueNumber,
 			&t.Year,
 			&t.PeriodKey,
-			&t.Basis,
 			&t.FOHTarget,
 			&t.BOHTarget,
 		); err != nil {
@@ -168,6 +192,35 @@ func GetLaborTargetsByVenueAndYear(ctx context.Context, db *sql.DB, venueID stri
 	}
 
 	return targets, rows.Err()
+}
+
+// GetAllActiveVenues returns a list of all active venues with region and venue number.
+func GetAllActiveVenues(ctx context.Context, db *sql.DB) ([]models.Venue, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database connection is nil")
+	}
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, name, COALESCE(venue_number, ''), COALESCE(region, ''), COALESCE(timezone, 'America/Denver')
+		FROM venues
+		WHERE is_active = true
+		ORDER BY region ASC, name ASC;
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("get all active venues: %w", err)
+	}
+	defer rows.Close()
+
+	var venues []models.Venue
+	for rows.Next() {
+		var v models.Venue
+		if err := rows.Scan(&v.ID, &v.Name, &v.VenueNumber, &v.Region, &v.Timezone); err != nil {
+			return nil, err
+		}
+		v.IsActive = true
+		venues = append(venues, v)
+	}
+	return venues, rows.Err()
 }
 
 // GetEventGuestCountAndCount sums guest_count and counts total events in a date range.
@@ -204,12 +257,11 @@ func UpsertLaborTarget(ctx context.Context, db *sql.DB, t *models.LaborEfficienc
 
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO labor_efficiency_targets
-			(venue_id, venue_number, year, period_key, basis, foh_target, boh_target)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+			(venue_id, venue_number, year, period_key, foh_target, boh_target)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (venue_id, period_key) DO UPDATE SET
 			venue_number = EXCLUDED.venue_number,
 			year         = EXCLUDED.year,
-			basis        = EXCLUDED.basis,
 			foh_target   = EXCLUDED.foh_target,
 			boh_target   = EXCLUDED.boh_target;
 	`,
@@ -217,7 +269,6 @@ func UpsertLaborTarget(ctx context.Context, db *sql.DB, t *models.LaborEfficienc
 		nilIfEmpty(t.VenueNumber),
 		t.Year,
 		t.PeriodKey,
-		t.Basis,
 		t.FOHTarget,
 		t.BOHTarget,
 	)
@@ -278,9 +329,22 @@ func LookupVenueIDByNumber(ctx context.Context, db *sql.DB, venueNum string) (st
 }
 
 // UpdateVenueMetadata updates the venue_number and/or region on an existing venue record.
-func UpdateVenueMetadata(ctx context.Context, db *sql.DB, venueID, venueNum, region string) error {
+// If clearRegion is true, region is set to NULL (unassigned). Otherwise, if region is non-empty,
+// it updates region; if empty, existing region is preserved.
+func UpdateVenueMetadata(ctx context.Context, db *sql.DB, venueID, venueNum, region string, clearRegion bool) error {
 	if db == nil || venueID == "" {
 		return nil
+	}
+
+	if clearRegion {
+		_, err := db.ExecContext(ctx, `
+			UPDATE venues
+			SET venue_number = COALESCE(NULLIF($2, ''), venue_number),
+			    region       = NULL,
+			    updated_at   = NOW()
+			WHERE id = $1;
+		`, venueID, venueNum)
+		return err
 	}
 
 	_, err := db.ExecContext(ctx, `

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"wedding-project/internal/adapters/salesforce"
+	"wedding-project/internal/database"
 	"wedding-project/internal/repositories"
 )
 
@@ -93,6 +94,80 @@ func (w *EventSyncWorker) SyncWeek(ctx context.Context, weekStart, weekEnd time.
 		return ctx.Err()
 	}
 
+	// Multi-instance distributed coordination: acquire PostgreSQL advisory lock for this week
+	if w.db != nil {
+		conn, err := w.db.Conn(ctx)
+		if err != nil {
+			return fmt.Errorf("checkout db connection for sync lock: %w", err)
+		}
+
+		lockKey := fmt.Sprintf("sf_sync_%s", key)
+		var acquired bool
+		var waited bool
+
+		// Capture the DB's initial sync state *before* waiting so we can compare DB timestamps
+		// without relying on or comparing application clock vs database server clock.
+		var initialSuccessAt sql.NullTime
+		initialStateKnown := true
+		err = conn.QueryRowContext(ctx,
+			`SELECT last_success_at FROM integration_sync_state WHERE source_system = 'salesforce' AND subscription_key = $1`,
+			subscriptionKey,
+		).Scan(&initialSuccessAt)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				initialSuccessAt = sql.NullTime{Valid: false}
+			} else {
+				// Failed to query initial state; disable result reuse so we don't falsely conclude it advanced
+				initialStateKnown = false
+				log.Printf("[AsyncSync WARNING] Could not query initial sync state for %s: %v. Result reuse disabled.", subscriptionKey, err)
+			}
+		}
+
+		for {
+			if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock(hashtext($1))", lockKey).Scan(&acquired); err != nil {
+				database.DiscardBadConn(conn)
+				return fmt.Errorf("query advisory lock for week %s: %w", key, err)
+			}
+			if acquired {
+				break
+			}
+
+			waited = true
+			// Another instance is syncing this week; wait and retry until lock is free or context expires
+			log.Printf("[AsyncSync] Week %s is currently being synced by another instance. Waiting...", key)
+			select {
+			case <-ctx.Done():
+				database.DiscardBadConn(conn)
+				return ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+			}
+		}
+
+		defer func() {
+			if acquired {
+				database.ReleaseAdvisoryLock(conn, "SELECT pg_advisory_unlock(hashtext($1))", lockKey)
+			} else {
+				_ = conn.Close()
+			}
+		}()
+
+		// If we waited for another instance to complete its sync, verify if it completed successfully
+		if waited && initialStateKnown {
+			var status string
+			var postSuccessAt sql.NullTime
+			query := `SELECT status, last_success_at FROM integration_sync_state WHERE source_system = 'salesforce' AND subscription_key = $1`
+			if err := conn.QueryRowContext(ctx, query, subscriptionKey).Scan(&status, &postSuccessAt); err == nil {
+				// Success if status is healthy and last_success_at advanced compared to what was in DB before waiting
+				hasAdvanced := postSuccessAt.Valid && (!initialSuccessAt.Valid || postSuccessAt.Time.After(initialSuccessAt.Time))
+				if status == "healthy" && hasAdvanced {
+					log.Printf("[AsyncSync] Week %s was successfully synchronized by another instance (last_success_at: %v). Reusing fresh result.", key, postSuccessAt.Time)
+					return nil
+				}
+				log.Printf("[AsyncSync] Waited for week %s, but another instance did not produce a new healthy sync (status=%q, initialSuccess=%v, postSuccess=%v). Proceeding with fresh fetch.", key, status, initialSuccessAt, postSuccessAt)
+			}
+		}
+	}
+
 	if err := repositories.RecordSyncAttempt(ctx, w.db, "salesforce", subscriptionKey); err != nil {
 		log.Printf("[AsyncSync WARNING] Failed to record sync attempt: %v", err)
 	}
@@ -153,6 +228,33 @@ func (w *EventSyncWorker) StartScheduledSync(ctx context.Context, interval time.
 }
 
 func (w *EventSyncWorker) sweepUpcomingWeeks(ctx context.Context, weeksAhead int) {
+	// Multi-instance distributed coordination: ensure only ONE instance sweeps at a time
+	if w.db != nil {
+		conn, err := w.db.Conn(ctx)
+		if err != nil {
+			log.Printf("[AsyncSync Scheduler WARNING] Failed to checkout DB conn for sweep lock: %v", err)
+			return
+		}
+
+		var acquired bool
+		if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock(hashtext('sf_sweep_scheduled_sync'))").Scan(&acquired); err != nil {
+			database.DiscardBadConn(conn)
+			log.Printf("[AsyncSync Scheduler WARNING] Failed to query sweep lock: %v", err)
+			return
+		} else if !acquired {
+			_ = conn.Close()
+			log.Println("[AsyncSync Scheduler] Another instance is currently running the periodic sweep. Skipping this run.")
+			return
+		}
+		defer func() {
+			if acquired {
+				database.ReleaseAdvisoryLock(conn, "SELECT pg_advisory_unlock(hashtext('sf_sweep_scheduled_sync'))", "")
+			} else {
+				_ = conn.Close()
+			}
+		}()
+	}
+
 	now := time.Now()
 	// Find Monday of current week
 	offset := int(time.Monday - now.Weekday())

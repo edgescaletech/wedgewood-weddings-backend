@@ -28,12 +28,15 @@ func registerRoutes(
 	mux.Handle("/api/events/", authServer.Middleware(eventByIDHandler(db, sf)))
 	mux.Handle("/api/sync/events", authServer.Middleware(syncEventsHandler(syncWorker)))
 
-	// --- Labor Goals API ---
+	// --- Labor Goals & Venues API ---
+	mux.Handle("/api/venues", authServer.Middleware(venuesListHandler(db)))
 	mux.Handle("/api/labor-goals/summary", authServer.Middleware(laborGoalsSummaryHandler(db)))
 	mux.Handle("/api/labor-goals/targets", authServer.Middleware(laborGoalsTargetsHandler(db)))
 	mux.Handle("/api/labor-goals/periods", authServer.Middleware(accountingPeriodsHandler(db)))
 	mux.Handle("/api/admin/labor-goals/upload", authServer.Middleware(laborGoalsUploadHandler(db)))
 	mux.Handle("/api/admin/accounting-periods/upload", authServer.Middleware(accountingPeriodsUploadHandler(db)))
+	mux.Handle("/api/admin/venues-overview", authServer.Middleware(venuesOverviewHandler(db)))
+	mux.Handle("/api/admin/regions", authServer.Middleware(regionsHandler(db)))
 
 	// --- Auth routes (Kaif's) ---
 	mux.HandleFunc("/auth/login", authServer.Login)

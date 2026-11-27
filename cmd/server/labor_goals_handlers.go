@@ -53,15 +53,16 @@ func laborGoalsSummaryHandler(db *sql.DB) http.HandlerFunc {
 func laborGoalsTargetsHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		venueID := r.URL.Query().Get("venueId")
+		region := r.URL.Query().Get("region")
 		yearStr := r.URL.Query().Get("year")
-		year := 2026
+		year := 2027
 		if yearStr != "" {
 			if parsed, err := strconv.Atoi(yearStr); err == nil && parsed > 0 {
 				year = parsed
 			}
 		}
 
-		targets, err := repositories.GetLaborTargetsByVenueAndYear(r.Context(), db, venueID, year)
+		targets, err := repositories.GetLaborTargets(r.Context(), db, venueID, region, year)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -71,8 +72,27 @@ func laborGoalsTargetsHandler(db *sql.DB) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"venueId": venueID,
+			"region":  region,
 			"year":    year,
 			"targets": targets,
+		})
+	}
+}
+
+// venuesListHandler returns all active venues for dropdowns and listings.
+func venuesListHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		venues, err := repositories.GetAllActiveVenues(r.Context(), db)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if venues == nil {
+			venues = []models.Venue{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"venues": venues,
+			"count":  len(venues),
 		})
 	}
 }
@@ -109,7 +129,7 @@ func accountingPeriodsHandler(db *sql.DB) http.HandlerFunc {
 // laborGoalsUploadHandler handles POST /api/admin/labor-goals/upload.
 //
 // Accepted CSV columns (case-insensitive header matching):
-//	Venue, Month, Basis, FOH guests per labor hour, BOH guests per labor hour
+//	Venue, Month, FOH guests per labor hour, BOH guests per labor hour
 //
 // Optionally a leading "Venue #" / "Venue Number" column is tolerated and
 // stored as venue_number for future reference.
@@ -184,7 +204,7 @@ func processLaborGoalsCSV(ctx context.Context, db *sql.DB, r io.Reader) (*csvUpl
 
 	var headers []string
 	colIdx := map[string]int{
-		"venue": -1, "month": -1, "basis": -1,
+		"venue": -1, "month": -1,
 		"foh": -1, "boh": -1, "venuenum": -1, "region": -1,
 	}
 
@@ -202,7 +222,7 @@ func processLaborGoalsCSV(ctx context.Context, db *sql.DB, r io.Reader) (*csvUpl
 
 		cleanRow := make([]string, len(row))
 		curCol := map[string]int{
-			"venue": -1, "month": -1, "basis": -1,
+			"venue": -1, "month": -1,
 			"foh": -1, "boh": -1, "venuenum": -1, "region": -1,
 		}
 		for i, h := range row {
@@ -213,8 +233,6 @@ func processLaborGoalsCSV(ctx context.Context, db *sql.DB, r io.Reader) (*csvUpl
 				curCol["venue"] = i
 			case clean == "month" || clean == "month (yyyy-mm)" || clean == "period" || clean == "period key":
 				curCol["month"] = i
-			case clean == "basis":
-				curCol["basis"] = i
 			case strings.HasPrefix(clean, "foh"):
 				curCol["foh"] = i
 			case strings.HasPrefix(clean, "boh"):
@@ -261,7 +279,6 @@ func processLaborGoalsCSV(ctx context.Context, db *sql.DB, r io.Reader) (*csvUpl
 
 		venueName := get("venue")
 		periodKey := get("month")
-		basis := get("basis")
 		fohStr := get("foh")
 		bohStr := get("boh")
 		venueNum := get("venuenum")
@@ -285,18 +302,26 @@ func processLaborGoalsCSV(ctx context.Context, db *sql.DB, r io.Reader) (*csvUpl
 			result.Skipped++
 			continue
 		}
-
-		foh, err := strconv.ParseFloat(fohStr, 64)
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("line %d: FOH %q is not a number", lineNum, fohStr))
-			result.Skipped++
-			continue
+		var fohPtr *float64
+		if fohStr != "" {
+			v, err := strconv.ParseFloat(fohStr, 64)
+			if err != nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("line %d: FOH %q is not a number", lineNum, fohStr))
+				result.Skipped++
+				continue
+			}
+			fohPtr = &v
 		}
-		boh, err := strconv.ParseFloat(bohStr, 64)
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("line %d: BOH %q is not a number", lineNum, bohStr))
-			result.Skipped++
-			continue
+
+		var bohPtr *float64
+		if bohStr != "" {
+			v, err := strconv.ParseFloat(bohStr, 64)
+			if err != nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("line %d: BOH %q is not a number", lineNum, bohStr))
+				result.Skipped++
+				continue
+			}
+			bohPtr = &v
 		}
 
 		// 1. Try matching by venue_number first (most reliable)
@@ -325,12 +350,13 @@ func processLaborGoalsCSV(ctx context.Context, db *sql.DB, r io.Reader) (*csvUpl
 		}
 
 		// 3. Update venues table with venue_number and region if available
-		if venueNum != "" || region != "" {
-			_ = repositories.UpdateVenueMetadata(ctx, db, venueID, venueNum, region)
-		}
-
-		if basis == "" {
-			basis = "Actual"
+		cleanRegion := strings.TrimSpace(region)
+		if strings.EqualFold(cleanRegion, "ungrouped") {
+			// Explicitly setting region to "Ungrouped" clears the region to NULL (unassigned)
+			_ = repositories.UpdateVenueMetadata(ctx, db, venueID, venueNum, "", true)
+		} else if venueNum != "" || cleanRegion != "" {
+			// Normal update: if cleanRegion is non-empty, sets region; if empty, preserves existing
+			_ = repositories.UpdateVenueMetadata(ctx, db, venueID, venueNum, cleanRegion, false)
 		}
 
 		target := &models.LaborEfficiencyTarget{
@@ -338,9 +364,8 @@ func processLaborGoalsCSV(ctx context.Context, db *sql.DB, r io.Reader) (*csvUpl
 			VenueNumber: venueNum,
 			Year:        year,
 			PeriodKey:   periodKey,
-			Basis:       basis,
-			FOHTarget:   &foh,
-			BOHTarget:   &boh,
+			FOHTarget:   fohPtr,
+			BOHTarget:   bohPtr,
 		}
 
 		if err := repositories.UpsertLaborTarget(ctx, db, target); err != nil {
