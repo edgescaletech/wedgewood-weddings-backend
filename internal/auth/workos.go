@@ -60,19 +60,29 @@ func (p workOS) Revoke(ctx context.Context, sessionID string) error {
 }
 
 // Password checks credentials with WorkOS without storing the password locally.
-func (p workOS) Password(ctx context.Context, email, password string) (*workos.AuthenticateResponse, error) {
+func (p workOS) Password(ctx context.Context, email, password, userAgent string) (*workos.AuthenticateResponse, error) {
 	return p.c.UserManagement().AuthenticateWithPassword(
 		ctx,
-		&workos.UserManagementAuthenticateWithPasswordParams{Email: email, Password: password},
+		&workos.UserManagementAuthenticateWithPasswordParams{Email: email, Password: password, UserAgent: &userAgent},
 	)
 }
 
 // VerifyEmail completes a WorkOS email verification challenge.
-func (p workOS) VerifyEmail(ctx context.Context, pendingToken, code string) (*workos.AuthenticateResponse, error) {
+func (p workOS) VerifyEmail(ctx context.Context, pendingToken, code, userAgent string) (*workos.AuthenticateResponse, error) {
 	return p.c.UserManagement().AuthenticateWithEmailVerification(ctx, &workos.UserManagementAuthenticateWithEmailVerificationParams{
 		PendingAuthenticationToken: pendingToken,
 		Code:                       code,
+		UserAgent:                  &userAgent,
 	})
+}
+
+func (p workOS) ListSessions(ctx context.Context, userID string) ([]workos.UserSessionsListItem, error) {
+	items := p.c.UserManagement().ListSessions(ctx, userID, nil)
+	var sessions []workos.UserSessionsListItem
+	for items.Next() {
+		sessions = append(sessions, *items.Current())
+	}
+	return sessions, items.Err()
 }
 
 // RequestPasswordReset asks WorkOS to email a password reset link.
