@@ -71,38 +71,6 @@ func authenticate(ctx context.Context, domainURL, clientID, clientSecret string)
 	return tokenResp, nil
 }
 
-func getOrgID(ctx context.Context, instanceURL, accessToken string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", instanceURL+"/services/oauth2/userinfo", nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("userinfo request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return "", err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("userinfo status %d", resp.StatusCode)
-	}
-	var userInfo map[string]any
-	if err := json.Unmarshal(body, &userInfo); err != nil {
-		return "", fmt.Errorf("userinfo json parse: %w", err)
-	}
-
-	if orgID, ok := userInfo["organization_id"].(string); ok {
-		return orgID, nil
-	}
-	return "", fmt.Errorf("organization_id not found in userinfo")
-}
-
 func unwrapAvro(v any) any {
 	if m, ok := v.(map[string]any); ok && len(m) == 1 {
 		for _, val := range m {

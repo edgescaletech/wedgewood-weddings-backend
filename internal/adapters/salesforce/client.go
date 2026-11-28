@@ -263,3 +263,121 @@ func (c *Client) doQueryResource(ctx context.Context, soql, resource string) ([]
 	}
 	return allRecords, nil
 }
+
+// OrganizationID scopes automatic retries to the organization authenticated by
+// this REST client, using the same lookup as the Pub/Sub subscriber.
+func (c *Client) OrganizationID(ctx context.Context) (string, error) {
+	token, err := c.ensureToken(ctx)
+	if err != nil {
+		return "", err
+	}
+	return LookupOrganizationID(ctx, c.httpClient, c.cfg.MyDomainURL, token)
+}
+
+// LookupOrganizationID resolves the organization for the supplied credentials.
+// Pub/Sub passes its own stream token so its tenant ID matches that token.
+func LookupOrganizationID(ctx context.Context, client *http.Client, instanceURL, token string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, instanceURL+"/services/oauth2/userinfo", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	response, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Salesforce userinfo HTTP %d", response.StatusCode)
+	}
+	var identity struct {
+		Org string `json:"organization_id"`
+	}
+	if err = json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&identity); err != nil {
+		return "", err
+	}
+	if identity.Org == "" {
+		return "", fmt.Errorf("Salesforce userinfo missing organization")
+	}
+	return identity.Org, nil
+}
+
+// DeletedOpportunities returns only positive evidence inside the server's covered
+// history window. Absence from this result says nothing about a record's existence.
+func (c *Client) DeletedOpportunities(ctx context.Context, start, end time.Time) (map[string]time.Time, error) {
+	start, end = start.UTC().Truncate(time.Minute), end.UTC().Truncate(time.Minute)
+	if end.Sub(start) <= time.Minute || end.Sub(start) > 15*24*time.Hour {
+		return nil, fmt.Errorf("invalid deletion history window")
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		token, err := c.ensureToken(ctx)
+		if err != nil {
+			return nil, err
+		}
+		endpoint := c.cfg.MyDomainURL + "/services/data/v62.0/sobjects/Opportunity/deleted/"
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return nil, err
+		}
+		q := req.URL.Query()
+		q.Set("start", start.Format(time.RFC3339))
+		q.Set("end", end.Format(time.RFC3339))
+		req.URL.RawQuery = q.Encode()
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
+			resp.Body.Close()
+			c.invalidateToken()
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, fmt.Errorf("Salesforce deletion history HTTP %d", resp.StatusCode)
+		}
+		var result struct {
+			Records []struct {
+				ID   string `json:"id"`
+				Date string `json:"deletedDate"`
+			} `json:"deletedRecords"`
+			Earliest string `json:"earliestDateAvailable"`
+			Latest   string `json:"latestDateCovered"`
+		}
+		err = json.NewDecoder(io.LimitReader(resp.Body, 128<<20)).Decode(&result)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		earliest, err := ParseSourceTimestamp(result.Earliest)
+		if err != nil {
+			return nil, err
+		}
+		latest, err := ParseSourceTimestamp(result.Latest)
+		if err != nil {
+			return nil, err
+		}
+		if latest.Before(earliest) || latest.After(end) {
+			return nil, fmt.Errorf("invalid deletion history coverage")
+		}
+		deleted := make(map[string]time.Time)
+		for _, record := range result.Records {
+			stamp, err := ParseSourceTimestamp(record.Date)
+			if err != nil {
+				return nil, err
+			}
+			if record.ID == "" {
+				return nil, fmt.Errorf("deletion history missing ID")
+			}
+			if stamp.Before(start) || stamp.Before(earliest) || stamp.After(latest) {
+				continue
+			}
+			if stamp.After(deleted[record.ID]) {
+				deleted[record.ID] = stamp
+			}
+		}
+		return deleted, nil
+	}
+	return nil, fmt.Errorf("Salesforce deletion history authentication failed")
+}

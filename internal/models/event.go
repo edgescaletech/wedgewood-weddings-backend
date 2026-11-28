@@ -36,6 +36,8 @@ type QuoteDetails struct {
 
 // Event represents an event record across the entire platform.
 type Event struct {
+	SyncStatus                string        `json:"syncStatus,omitempty"`
+	LastSyncedAt              *time.Time    `json:"lastSyncedAt,omitempty"`
 	SalesforceModifiedAt      time.Time     `json:"-"`
 	ID                        string        `json:"id"`
 	Name                      string        `json:"name"`

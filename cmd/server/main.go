@@ -317,6 +317,9 @@ func eventByIDHandler(db *sql.DB, sf *salesforce.Client) http.HandlerFunc {
 			if err != nil {
 				return err
 			}
+			if evt != nil {
+				evt.SyncStatus = "live"
+			}
 			if conn != nil && evt != nil && allowed[evt.VenueID] {
 				if err = repositories.UpsertEvent(r.Context(), conn, evt); err != nil {
 					log.Printf("Event cache write failed for %s: %v", id, err)
@@ -326,12 +329,22 @@ func eventByIDHandler(db *sql.DB, sf *salesforce.Client) http.HandlerFunc {
 		}
 		var err error
 		if db != nil {
-			conn, checkoutErr := db.Conn(r.Context())
+			checkoutCtx, cancel := context.WithTimeout(r.Context(), 200*time.Millisecond)
+			conn, checkoutErr := db.Conn(checkoutCtx)
+			cancel()
 			if checkoutErr != nil {
 				err = fetchAndCache(nil)
 			} else {
-				defer conn.Close()
-				err = database.WithEventCacheGate(r.Context(), conn, false, func() error { return fetchAndCache(conn) })
+				acquired, gateErr := database.TryEventCacheGateShared(r.Context(), conn, func() error { return fetchAndCache(conn) })
+				_ = conn.Close()
+				if acquired {
+					err = gateErr
+				} else {
+					if gateErr != nil {
+						log.Printf("Cache unavailable for event %s: %v", id, gateErr)
+					}
+					err = fetchAndCache(nil)
+				}
 			}
 		} else {
 			err = fetchAndCache(nil)

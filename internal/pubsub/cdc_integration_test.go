@@ -60,7 +60,7 @@ func cdcTestDatabase(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	for _, name := range []string{"001_phase1_tables.up.sql", "003_event_sync_tracking.up.sql", "005_venue_number_and_region.up.sql"} {
+	for _, name := range []string{"001_phase1_tables.up.sql", "002_auth.up.sql", "003_event_sync_tracking.up.sql", "005_venue_number_and_region.up.sql", "006_admin.up.sql", "011_unresolved_sync_records.up.sql"} {
 		migration, err := os.ReadFile(filepath.Join("..", "migrations", name))
 		if err != nil {
 			t.Fatal(err)
@@ -327,7 +327,7 @@ func TestCDCPostgresRecoveryWaitsForInflightCacheWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = reconcileCDCCache(ctx, recovery, client); err != nil {
+	if err = reconcileCDCCache(ctx, recovery, client, "gate-test"); err != nil {
 		t.Fatal(err)
 	}
 	var active bool

@@ -374,6 +374,7 @@ func scanEvent(rows *sql.Rows) (models.Event, error) {
 	var packageName, coordinatorName, djName, decorSetupTime, beoNotes, notes sql.NullString
 	var cateringBytes []byte
 	var venueNumber, venueRegion, venueTimezone sql.NullString
+	var lastSyncedAt sql.NullTime
 
 	err := rows.Scan(
 		&e.ID, &venueID, &e.Name, &eventDate, &dayOfWeek, &startTime, &endTime,
@@ -385,12 +386,15 @@ func scanEvent(rows *sql.Rows) (models.Event, error) {
 		&barLastCallTime, &barLastCallDateTime, &anticipatedBarActivity, &otherBarNotes,
 		&beverageCartDetails, &signatureDrinks, &chargerPlates, &e.PhotoBooth, &e.PhotoboothStaffed,
 		&packageName, &coordinatorName, &djName, &decorSetupTime, &beoNotes, &notes, &cateringBytes,
-		&venueNumber, &venueRegion, &venueTimezone,
+		&venueNumber, &venueRegion, &venueTimezone, &e.SyncStatus, &lastSyncedAt,
 	)
 	if err != nil {
 		return e, err
 	}
 
+	if lastSyncedAt.Valid {
+		e.LastSyncedAt = &lastSyncedAt.Time
+	}
 	e.EventDate = eventDate.Format("2006-01-02")
 	e.VenueID = venueID.String
 	e.DayOfWeek = dayOfWeek.String
@@ -453,7 +457,10 @@ const selectEventColumns = `
 	events.bar_last_call_time, events.bar_last_call_datetime, events.anticipated_bar_activity, events.other_bar_notes,
 	events.beverage_cart_details, events.signature_drinks, events.charger_plates, events.photo_booth, events.photobooth_staffed,
 	events.package_name, events.coordinator_name, events.dj_name, events.decor_setup_time, events.beo_notes, events.notes, events.catering_details,
-	COALESCE(v.venue_number, ''), COALESCE(v.region, ''), COALESCE(v.timezone, 'America/Denver')
+	COALESCE(v.venue_number, ''), COALESCE(v.region, ''), COALESCE(v.timezone, 'America/Denver'),
+ CASE WHEN EXISTS(SELECT 1 FROM unresolved_sync_records u WHERE u.source_system='salesforce_pubsub'
+ AND u.entity_name='Opportunity' AND u.source_record_id=events.id AND u.status='unresolved') THEN 'unverified' ELSE 'cached' END,
+ CASE WHEN events.salesforce_last_modified_at IS NOT NULL THEN events.last_synced_at END
 `
 
 // GetEventsByWeek fetches events for the given week from PostgreSQL.

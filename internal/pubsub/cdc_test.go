@@ -27,6 +27,7 @@ func TestCDCDeletesEveryRecordAndCommitsBookmarkAtomically(t *testing.T) {
 			ids := []any{"006000000000001", "006000000000002"}
 			payload := map[string]any{"ChangeEventHeader": map[string]any{"entityName": "Opportunity", "changeType": "DELETE", "recordIds": ids, "commitTimestamp": int64(1795800000000)}}
 			mock.ExpectBegin()
+			mock.ExpectExec("SELECT pg_advisory_xact_lock").WillReturnResult(sqlmock.NewResult(0, 1))
 			first := mock.ExpectExec("INSERT INTO events").WithArgs(ids[0], time.UnixMilli(1795800000000).UTC())
 			if failure == "delete" {
 				first.WillReturnError(errors.New("write failed"))
@@ -34,7 +35,9 @@ func TestCDCDeletesEveryRecordAndCommitsBookmarkAtomically(t *testing.T) {
 			} else {
 				// Deleting an already absent record must still allow replay progress.
 				first.WillReturnResult(sqlmock.NewResult(0, 0))
+				mock.ExpectQuery("SELECT is_active").WillReturnRows(sqlmock.NewRows([]string{"matches"}).AddRow(false))
 				mock.ExpectExec("INSERT INTO events").WithArgs(ids[1], time.UnixMilli(1795800000000).UTC()).WillReturnResult(sqlmock.NewResult(0, 1))
+				mock.ExpectQuery("SELECT is_active").WillReturnRows(sqlmock.NewRows([]string{"matches"}).AddRow(false))
 				mock.ExpectExec("INSERT INTO integration_inbox").WillReturnResult(sqlmock.NewResult(1, 1))
 				checkpoint := mock.ExpectExec("INSERT INTO integration_sync_state").WithArgs(cdcSource, "key", []byte{1, 2})
 				if failure == "checkpoint" {

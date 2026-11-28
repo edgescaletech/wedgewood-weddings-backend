@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
@@ -22,7 +23,7 @@ import (
 	proto "wedding-project/proto"
 )
 
-const cdcSource = "salesforce_pubsub"
+const cdcSource = repositories.CDCSource
 
 var errRecoveryRequired = errors.New("CDC reconciliation required")
 
@@ -104,7 +105,7 @@ func runSubscriberSession(parent context.Context, db *sql.DB, client *sf.Client,
 	if err != nil {
 		return err
 	}
-	org, err := getOrgID(ctx, token.InstanceURL, token.AccessToken)
+	org, err := sf.LookupOrganizationID(ctx, &http.Client{Timeout: 10 * time.Second}, token.InstanceURL, token.AccessToken)
 	if err != nil {
 		return err
 	}
@@ -151,9 +152,12 @@ func consumeCDCStream(ctx context.Context, conn *sql.Conn, client *sf.Client, ke
 		// Receive the subscription anchor BEFORE loading the snapshot. Do not save
 		// that anchor until reconciliation and every event in this response succeed.
 		if recovery {
+			if err = requireCDCRecovery(ctx, conn, key); err != nil {
+				return err
+			}
 			log.Print("[PubSub CDC] Stream anchor received; reconciling cached scheduling scope before advancing replay")
 			recoveryCtx, stop := context.WithTimeout(ctx, 30*time.Minute)
-			err := reconcileCDCCache(recoveryCtx, conn, client)
+			err := reconcileCDCCache(recoveryCtx, conn, client, key)
 			stop()
 			if err != nil {
 				return fmt.Errorf("CDC recovery failed; checkpoint unchanged: %w", err)
@@ -224,7 +228,7 @@ func saveCDCCheckpoint(ctx context.Context, exec repositories.EventExecutor, key
 	if len(replay) == 0 {
 		return errors.New("empty CDC replay ID")
 	}
-	_, err := exec.ExecContext(ctx, `INSERT INTO integration_sync_state (source_system,subscription_key,replay_id,status,last_success_at,last_synced_at,updated_at) VALUES ($1,$2,$3,'healthy',NOW(),NOW(),NOW()) ON CONFLICT (source_system,subscription_key) DO UPDATE SET replay_id=EXCLUDED.replay_id,status='healthy',last_error=NULL,last_success_at=NOW(),last_synced_at=NOW(),updated_at=NOW()`, cdcSource, key, replay)
+	_, err := exec.ExecContext(ctx, `INSERT INTO integration_sync_state (source_system,subscription_key,replay_id,status,last_success_at,last_synced_at,updated_at) VALUES ($1,$2,$3,'healthy',NOW(),NOW(),NOW()) ON CONFLICT (source_system,subscription_key) DO UPDATE SET replay_id=EXCLUDED.replay_id,status=CASE WHEN integration_sync_state.status IN ('recovery_incomplete','recovery_required') THEN integration_sync_state.status ELSE 'healthy' END,last_error=CASE WHEN integration_sync_state.status IN ('recovery_incomplete','recovery_required') THEN integration_sync_state.last_error ELSE NULL END,last_success_at=NOW(),last_synced_at=NOW(),updated_at=NOW()`, cdcSource, key, replay)
 	return err
 }
 
@@ -298,6 +302,7 @@ func processCDCMessage(ctx context.Context, conn *sql.Conn, client *sf.Client, k
 	}
 	mutations := make(map[string]*models.Event)
 	deletions := make(map[string]time.Time)
+	unconfirmed := make(map[string]bool)
 	if entity == "Opportunity" {
 		switch change {
 		case "CREATE", "UPDATE", "UNDELETE", "DELETE":
@@ -318,6 +323,10 @@ func processCDCMessage(ctx context.Context, conn *sql.Conn, client *sf.Client, k
 			event, err := sf.GetEventByIDContext(ctx, client, id)
 			if errors.Is(err, sf.ErrEventNotFound) {
 				deleted, version, checkErr := confirmedDeleted(ctx, client, id)
+				if errors.Is(checkErr, ErrUnconfirmedMissing) {
+					unconfirmed[id] = true
+					continue
+				}
 				if checkErr != nil {
 					return checkErr
 				}
@@ -339,7 +348,16 @@ func processCDCMessage(ctx context.Context, conn *sql.Conn, client *sf.Client, k
 		return err
 	}
 	defer tx.Rollback()
+	if err = repositories.LockSyncIssues(ctx, tx, key); err != nil {
+		return err
+	}
 	for _, id := range ids {
+		if unconfirmed[id] {
+			if err = repositories.RecordUnresolvedTx(ctx, tx, key, id, "missing_from_queryall"); err != nil {
+				return err
+			}
+			continue
+		}
 		event, present := mutations[id]
 		if !present {
 			continue
@@ -351,6 +369,24 @@ func processCDCMessage(ctx context.Context, conn *sql.Conn, client *sf.Client, k
 		}
 		if err != nil {
 			return err
+		}
+		status := "restored"
+		version := deletions[id]
+		if event == nil {
+			status = "confirmed_deleted"
+		} else {
+			version = event.SalesforceModifiedAt
+		}
+		// Only resolve an issue when the final cached state agrees with this
+		// source observation (an old replay can be rejected by version guards).
+		var matches bool
+		if err = tx.QueryRowContext(ctx, "SELECT is_active=$2 AND salesforce_last_modified_at=$3 FROM events WHERE id=$1", id, event != nil, version).Scan(&matches); err != nil {
+			return err
+		}
+		if matches {
+			if err = repositories.ResolveSyncIssueTx(ctx, tx, key, id, status, "system:cdc", "Record verified through CDC", "Salesforce CDC message and source version", version); err != nil {
+				return err
+			}
 		}
 	}
 	data, err := json.Marshal(payload)
@@ -364,5 +400,11 @@ func processCDCMessage(ctx context.Context, conn *sql.Conn, client *sf.Client, k
 	if err = saveCDCCheckpoint(ctx, tx, key, replay); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	for id := range unconfirmed {
+		log.Printf("[PubSub CDC] Unresolved record %s in subscription %s; scheduled verification pending", id, key)
+	}
+	return nil
 }

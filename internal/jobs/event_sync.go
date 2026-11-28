@@ -10,6 +10,7 @@ import (
 
 	"wedding-project/internal/adapters/salesforce"
 	"wedding-project/internal/database"
+	"wedding-project/internal/pubsub"
 	"wedding-project/internal/repositories"
 )
 
@@ -236,6 +237,7 @@ func (w *EventSyncWorker) StartScheduledSync(ctx context.Context, interval time.
 }
 
 func (w *EventSyncWorker) sweepUpcomingWeeks(ctx context.Context, weeksAhead int) {
+	var sweepConn *sql.Conn
 	// Multi-instance distributed coordination: ensure only ONE instance sweeps at a time
 	if w.db != nil {
 		conn, err := w.db.Conn(ctx)
@@ -244,6 +246,7 @@ func (w *EventSyncWorker) sweepUpcomingWeeks(ctx context.Context, weeksAhead int
 			return
 		}
 
+		sweepConn = conn
 		var acquired bool
 		if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock(hashtext('sf_sweep_scheduled_sync'))").Scan(&acquired); err != nil {
 			database.DiscardBadConn(conn)
@@ -286,5 +289,10 @@ func (w *EventSyncWorker) sweepUpcomingWeeks(ctx context.Context, weeksAhead int
 			log.Printf("[AsyncSync Scheduler] Sweep error for week %s: %v", wStart.Format("2006-01-02"), err)
 		}
 		cancel()
+	}
+	if sweepConn != nil {
+		if err := pubsub.RetryUnresolved(ctx, sweepConn, w.sf); err != nil {
+			log.Printf("[AsyncSync Scheduler] Unresolved verification: %v", err)
+		}
 	}
 }
