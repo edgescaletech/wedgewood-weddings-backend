@@ -99,7 +99,7 @@ The Users & Access directory requests `GET /api/admin/users?view=directory` with
      -v display_name='First Admin'
    ```
 
-To get the invitation_id : 
+To get the invitation_id :
    ```
    curl -fsSG 'https://api.workos.com/user_management/invitations' \
   -H "Authorization: Bearer $workos_api_key" \
@@ -209,6 +209,17 @@ go run ./cmd/pubsub/
 
 It listens for Salesforce change events and prints them; it does not invalidate the HTTP event cache.
 
+The HTTP API starts its own database-backed CDC subscriber. Only the instance holding the PostgreSQL leader lock consumes changes. It stores replay checkpoints per Salesforce organization and topic in `integration_sync_state`, using the existing migrations 001 and 003. Event mutations, audit entries, and checkpoints commit together on the leader connection. Failed processing leaves the checkpoint unchanged.
+
+The subscriber resumes from the stored replay ID. On first startup, a rejected replay ID, or a CDC gap event, it establishes a live stream anchor before reconciling all cached active-event weeks and the upcoming scheduling window. The window follows `SF_TO_DB_SYNC_WEEKS_AHEAD` (or `SYNC_WEEKS_AHEAD`), defaulting to four weeks. Recovery takes an exclusive cache coordination lock before scanning; normal scheduled and single-event cache writers hold its shared counterpart across their complete fetch and write. This lets in-flight cache writes finish before the scan. HTTP cache misses use a single lock attempt and fall back to an uncached Salesforce response when recovery is busy; background cache writers can wait. A successful single-event cache fill completes within the request while holding that lock. Recovery applies the buffered response after reconciliation, then resumes normal consumption. Salesforce retains later stream messages while the snapshot runs; no unbounded in-memory buffer is used.
+
+Deletions retain inactive, source-versioned event records rather than physically removing them. Both single and batch cache writes use Salesforce `SystemModstamp` so an older fetch cannot restore a deletion. Only a newer source version can reactivate the record. Event reads and labor guest totals exclude inactive records. All application instances must run this version before relying on this protection; an older binary does not enforce the write guards.
+
+Recovery requires complete Salesforce query results and explicit deletion confirmation through `queryAll`. If a cached record is absent there, recovery durably records an unresolved issue and continues with other records. The hourly scheduled sweep automatically retries unresolved records without guessing that absence means deletion. It does not infer deletion from missing results. Recovery covers the cached scheduling scope, not the organization's entire uncached history. Do not remove checkpoints or deletion markers as routine cleanup.
+
+To run CDC integration tests, set `CDC_TEST_DATABASE_URL` to a disposable PostgreSQL database and run `go test ./internal/pubsub`. Tests create and remove isolated schemas, and one test terminates its own test connection to verify leader failure handling. No Salesforce credentials are used by these tests.
+
+
 ## Development checks
 
 ```sh
@@ -264,3 +275,61 @@ Call `HasGlobalPermission` for global operations and `HasResourcePermission` wit
 The venue-table trigger mirrors inserts and status changes into the registry. Migration 006 sets legacy NULL activity to true and makes the column non-nullable. A suspended venue reopens only when its status is explicitly set to true. A false status suspends access, including global grants when evaluated against that venue, and blocks new assignments. Administrators can inspect and revoke existing assignments while the venue is suspended. Reopening the venue restores access from remaining assignments and keeps the same UUID. The existing Salesforce upserts preserve venue activity on conflict. An external ID reused without a recorded delete still represents the same venue. A hard delete audits direct grants and cascades their removal. Recreating that venue creates a fresh registry UUID.
 
 Apply migrations through 010 before starting the matching release.
+
+### Unresolved Salesforce records and recovery
+
+Apply migration **011** before deploying this code. Recovery records a missing
+`queryAll` result in `unresolved_sync_records`; it does not infer deletion from
+absence. Other records continue syncing after that issue is saved. Transport,
+permission-request, decoding, and database errors still stop the attempt without
+advancing its replay checkpoint. Open issues keep the subscription's status at
+`recovery_incomplete` through subsequent messages and keepalives. An active
+`recovery_required` state is cleared only after full reconciliation completes.
+
+Event list/detail responses include `syncStatus` (`cached`, `unverified`, or
+`live`) and, when reliable, `lastSyncedAt`. Unresolved cached records remain
+visible only under the existing application venue permissions, with an unverified
+warning. Legacy records without a source version have an unknown sync time rather
+than presenting a migration/default timestamp as a successful synchronization.
+The warning is also present in the BEO view/print output.
+
+Event-detail cache misses try the shared recovery lock once. If unavailable, the
+connection is released before fetching from Salesforce, the existing venue check
+still applies, and the response is not cached. Connection checkout and the lock
+query each have a 200ms timeout. When the lock is available, the same protected
+connection covers fetch-and-save. This removes recovery waiting from HTTP requests;
+it does not promise a fixed response time or unlimited database capacity.
+
+#### Automatic verification
+
+The existing scheduled sweep retries up to 20 due unresolved Opportunities after
+its normal weekly sync. There is no additional cron job or manual CLI. Retries
+use the configured Salesforce organization/topic, the existing sweep lock and a
+single non-blocking shared recovery gate. A busy recovery skips this batch. Each
+batch has a two-minute budget and each source check a ten-second timeout.
+
+Current records are refreshed and their warnings cleared automatically. Explicit
+`IsDeleted=true`, or a matching timestamped entry in Salesforce's recent deletion
+history when the record is currently absent, permits a version-guarded soft delete.
+An empty query, 404, expired history or missing history entry never proves deletion.
+Uncertain records retain their warning and are retried on later scheduled runs.
+Retry delays increase from one hour to at most 24 hours; due-time ordering prevents
+one repeatedly failing record from monopolizing the batch. Repeated detections do
+not reset that schedule. All source calls happen outside SQL transactions; data,
+resolution and audit changes commit together on the sweep-lock connection.
+
+The migration's **down** file is destructive to issue tracking. Export the tracking
+table and revert application code before executing down; resolution audit entries
+in `audit_logs` are retained. Application instances must all run the updated writer
+coordination/version guards before relying on these protections.
+
+No outbound Salesforce business-record update path currently exists in this backend
+(the REST adapter's POST is OAuth authentication). This change does not add unused
+mutation-blocking infrastructure or disable unrelated scheduling actions. Any future
+Salesforce record writer must enforce unresolved-record restrictions on the server.
+
+For local verification, point `CDC_TEST_DATABASE_URL` and `RBAC_TEST_DATABASE_URL`
+at a disposable PostgreSQL database and run `go test ./...`. Tests use isolated
+schemas; the pool test holds a real exclusive recovery lock and checks that
+uncached responses leave capacity for an unrelated database read. Live Salesforce
+failover remains a separate deployment validation step.

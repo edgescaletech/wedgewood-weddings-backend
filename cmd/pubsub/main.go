@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 
+	sf "wedding-project/internal/adapters/salesforce"
 	proto "wedding-project/proto"
 )
 
@@ -88,32 +89,6 @@ func authenticate(domainURL, clientID, clientSecret string) (sfOAuthResponse, er
 		return tokenResp, fmt.Errorf("OAuth JSON parse error: %w", err)
 	}
 	return tokenResp, nil
-}
-
-// getOrgID fetches the tenant/org ID from the OAuth identity URL
-func getOrgID(instanceURL, accessToken string) (string, error) {
-	// Call the userinfo endpoint to get the org ID
-	req, _ := http.NewRequest("GET", instanceURL+"/services/oauth2/userinfo", nil)
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("userinfo request error: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var userInfo map[string]any
-	if err := json.Unmarshal(body, &userInfo); err != nil {
-		return "", fmt.Errorf("userinfo JSON parse error: %w", err)
-	}
-
-	// org_id is in the userinfo response
-	if orgID, ok := userInfo["organization_id"].(string); ok {
-		return orgID, nil
-	}
-	return "", fmt.Errorf("organization_id not found in userinfo response")
 }
 
 // unwrapAvro unwraps Avro union types from goavro's map[string]interface{} format.
@@ -212,7 +187,6 @@ func main() {
 	fmt.Println("   Connecting to:", pubsubEndpoint)
 	fmt.Println()
 
-
 	// Step 1: Load credentials (.env for local dev; Render injects real env vars)
 	loadEnv(".env")
 
@@ -224,7 +198,6 @@ func main() {
 		fmt.Println("❌ Missing SF_MY_DOMAIN_URL, SF_CLIENT_ID or SF_CLIENT_SECRET")
 		os.Exit(1)
 	}
-
 
 	// Step 2: OAuth Authentication
 	fmt.Println("🔐 Authenticating with Salesforce...")
@@ -238,7 +211,7 @@ func main() {
 
 	// Step 3: Get Org/Tenant ID
 	fmt.Println("🔍 Fetching Org ID...")
-	orgID, err := getOrgID(tokenResp.InstanceURL, tokenResp.AccessToken)
+	orgID, err := sf.LookupOrganizationID(context.Background(), &http.Client{Timeout: 10 * time.Second}, tokenResp.InstanceURL, tokenResp.AccessToken)
 	if err != nil {
 		fmt.Println("❌ Failed to get Org ID:", err)
 		os.Exit(1)

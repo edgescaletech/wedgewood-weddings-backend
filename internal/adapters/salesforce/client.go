@@ -60,7 +60,7 @@ type tokenResponse struct {
 	ErrorDesc   string `json:"error_description"`
 }
 
-func (c *Client) ensureToken() (string, error) {
+func (c *Client) ensureToken(ctx context.Context) (string, error) {
 	c.tokenMu.RLock()
 	tok := c.token
 	c.tokenMu.RUnlock()
@@ -82,7 +82,7 @@ func (c *Client) ensureToken() (string, error) {
 		return c.token, nil
 	}
 
-	newToken, err := c.fetchClientCredentialsToken()
+	newToken, err := c.fetchClientCredentialsToken(ctx)
 	if err != nil {
 		return "", fmt.Errorf("salesforce oauth: %w", err)
 	}
@@ -96,19 +96,30 @@ func (c *Client) invalidateToken() {
 	c.token = ""
 }
 
-func (c *Client) fetchClientCredentialsToken() (string, error) {
+func (c *Client) fetchClientCredentialsToken(ctx context.Context) (string, error) {
 	tokenURL := c.cfg.MyDomainURL + "/services/oauth2/token"
 	body := url.Values{}
 	body.Set("grant_type", "client_credentials")
 	body.Set("client_id", c.cfg.ClientID)
 	body.Set("client_secret", c.cfg.ClientSecret)
 
-	resp, err := c.httpClient.PostForm(tokenURL, body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(body.Encode()))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("OAuth HTTP %d", resp.StatusCode)
+	}
 
 	var tr tokenResponse
 	if err := json.Unmarshal(raw, &tr); err != nil {
@@ -116,6 +127,9 @@ func (c *Client) fetchClientCredentialsToken() (string, error) {
 	}
 	if tr.Error != "" {
 		return "", fmt.Errorf("%s: %s", tr.Error, tr.ErrorDesc)
+	}
+	if tr.AccessToken == "" {
+		return "", fmt.Errorf("OAuth response missing access token")
 	}
 	return tr.AccessToken, nil
 }
@@ -144,13 +158,27 @@ func (c *Client) QueryContext(ctx context.Context, soql string) ([]json.RawMessa
 	return records, err
 }
 
+// QueryAllContext includes soft-deleted records; never infer deletion from an absent row.
+func (c *Client) QueryAllContext(ctx context.Context, soql string) ([]json.RawMessage, error) {
+	rows, err := c.doQueryResource(ctx, soql, "queryAll")
+	if err != nil && strings.Contains(err.Error(), "401 unauthorized") {
+		c.invalidateToken()
+		return c.doQueryResource(ctx, soql, "queryAll")
+	}
+	return rows, err
+}
+
 func (c *Client) doQuery(ctx context.Context, soql string) ([]json.RawMessage, error) {
-	token, err := c.ensureToken()
+	return c.doQueryResource(ctx, soql, "query")
+}
+
+func (c *Client) doQueryResource(ctx context.Context, soql, resource string) ([]json.RawMessage, error) {
+	token, err := c.ensureToken(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	endpoint := c.cfg.MyDomainURL + "/services/data/v62.0/query"
+	endpoint := c.cfg.MyDomainURL + "/services/data/v62.0/" + resource
 	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -191,34 +219,165 @@ func (c *Client) doQuery(ctx context.Context, soql string) ([]json.RawMessage, e
 			fullNextURL = c.cfg.MyDomainURL + nextURL
 		}
 
-		pageReq, err := http.NewRequest("GET", fullNextURL, nil)
+		base, baseErr := url.Parse(c.cfg.MyDomainURL)
+		next, nextErr := url.Parse(fullNextURL)
+		if baseErr != nil || nextErr != nil || base.Scheme != next.Scheme || base.Host != next.Host {
+			return nil, fmt.Errorf("Salesforce pagination URL changed origin")
+		}
+		pageReq, err := http.NewRequestWithContext(ctx, "GET", fullNextURL, nil)
 		if err != nil {
-			break
+			return nil, fmt.Errorf("build query page request: %w", err)
 		}
 		pageReq.Header.Set("Authorization", "Bearer "+token)
 		pageReq.Header.Set("Accept", "application/json")
 
 		pageResp, err := c.httpClient.Do(pageReq)
-		if err != nil || pageResp.StatusCode != http.StatusOK {
-			if pageResp != nil {
-				pageResp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("Salesforce query page: %w", err)
+		}
+		if pageResp.StatusCode != http.StatusOK {
+			pageResp.Body.Close()
+			if pageResp.StatusCode == http.StatusUnauthorized {
+				return nil, fmt.Errorf("salesforce: 401 unauthorized")
 			}
-			break
+			return nil, fmt.Errorf("incomplete Salesforce query page: HTTP %d", pageResp.StatusCode)
 		}
 
 		var pageQR QueryResponse
 		decodeErr := json.NewDecoder(pageResp.Body).Decode(&pageQR)
 		pageResp.Body.Close()
 		if decodeErr != nil {
-			break
+			return nil, fmt.Errorf("decode Salesforce query page: %w", decodeErr)
 		}
 
 		allRecords = append(allRecords, pageQR.Records...)
+		qr.Done = pageQR.Done
 		if pageQR.Done {
 			break
 		}
 		nextURL = pageQR.NextRecordsURL
 	}
 
+	if !qr.Done {
+		return nil, fmt.Errorf("incomplete Salesforce query: no completion marker")
+	}
 	return allRecords, nil
+}
+
+// OrganizationID scopes automatic retries to the organization authenticated by
+// this REST client, using the same lookup as the Pub/Sub subscriber.
+func (c *Client) OrganizationID(ctx context.Context) (string, error) {
+	token, err := c.ensureToken(ctx)
+	if err != nil {
+		return "", err
+	}
+	return LookupOrganizationID(ctx, c.httpClient, c.cfg.MyDomainURL, token)
+}
+
+// LookupOrganizationID resolves the organization for the supplied credentials.
+// Pub/Sub passes its own stream token so its tenant ID matches that token.
+func LookupOrganizationID(ctx context.Context, client *http.Client, instanceURL, token string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, instanceURL+"/services/oauth2/userinfo", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	response, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Salesforce userinfo HTTP %d", response.StatusCode)
+	}
+	var identity struct {
+		Org string `json:"organization_id"`
+	}
+	if err = json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&identity); err != nil {
+		return "", err
+	}
+	if identity.Org == "" {
+		return "", fmt.Errorf("Salesforce userinfo missing organization")
+	}
+	return identity.Org, nil
+}
+
+// DeletedOpportunities returns only positive evidence inside the server's covered
+// history window. Absence from this result says nothing about a record's existence.
+func (c *Client) DeletedOpportunities(ctx context.Context, start, end time.Time) (map[string]time.Time, error) {
+	start, end = start.UTC().Truncate(time.Minute), end.UTC().Truncate(time.Minute)
+	if end.Sub(start) <= time.Minute || end.Sub(start) > 15*24*time.Hour {
+		return nil, fmt.Errorf("invalid deletion history window")
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		token, err := c.ensureToken(ctx)
+		if err != nil {
+			return nil, err
+		}
+		endpoint := c.cfg.MyDomainURL + "/services/data/v62.0/sobjects/Opportunity/deleted/"
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return nil, err
+		}
+		q := req.URL.Query()
+		q.Set("start", start.Format(time.RFC3339))
+		q.Set("end", end.Format(time.RFC3339))
+		req.URL.RawQuery = q.Encode()
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
+			resp.Body.Close()
+			c.invalidateToken()
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, fmt.Errorf("Salesforce deletion history HTTP %d", resp.StatusCode)
+		}
+		var result struct {
+			Records []struct {
+				ID   string `json:"id"`
+				Date string `json:"deletedDate"`
+			} `json:"deletedRecords"`
+			Earliest string `json:"earliestDateAvailable"`
+			Latest   string `json:"latestDateCovered"`
+		}
+		err = json.NewDecoder(io.LimitReader(resp.Body, 128<<20)).Decode(&result)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		earliest, err := ParseSourceTimestamp(result.Earliest)
+		if err != nil {
+			return nil, err
+		}
+		latest, err := ParseSourceTimestamp(result.Latest)
+		if err != nil {
+			return nil, err
+		}
+		if latest.Before(earliest) || latest.After(end) {
+			return nil, fmt.Errorf("invalid deletion history coverage")
+		}
+		deleted := make(map[string]time.Time)
+		for _, record := range result.Records {
+			stamp, err := ParseSourceTimestamp(record.Date)
+			if err != nil {
+				return nil, err
+			}
+			if record.ID == "" {
+				return nil, fmt.Errorf("deletion history missing ID")
+			}
+			if stamp.Before(start) || stamp.Before(earliest) || stamp.After(latest) {
+				continue
+			}
+			if stamp.After(deleted[record.ID]) {
+				deleted[record.ID] = stamp
+			}
+		}
+		return deleted, nil
+	}
+	return nil, fmt.Errorf("Salesforce deletion history authentication failed")
 }

@@ -35,9 +35,10 @@ func registerRoutes(
 	mux.Handle("/api/events/", authServer.Middleware(venueAccess(db, "schedules.view", false, eventByIDHandler(db, sf))))
 	mux.Handle("/api/sync/events", authServer.Middleware(syncEventsHandler(syncWorker)))
 
-	// --- Labor Goals API ---
+	// --- Labor Goals API  & Venues API ---
+	mux.Handle("/api/venues", authServer.Middleware(venueAccess(db, "labor_goals.view", false, venuesListHandler(db))))
 	mux.Handle("/api/labor-goals/summary", authServer.Middleware(venueAccess(db, "labor_goals.view", true, laborGoalsSummaryHandler(db))))
-	mux.Handle("/api/labor-goals/targets", authServer.Middleware(venueAccess(db, "labor_goals.view", true, laborGoalsTargetsHandler(db))))
+	mux.Handle("/api/labor-goals/targets", authServer.Middleware(venueAccess(db, "labor_goals.view", false, laborGoalsTargetsHandler(db))))
 	mux.Handle("/api/labor-goals/periods", authServer.Middleware(accountingPeriodsHandler(db)))
 	access := &authorization.Service{DB: db}
 	requireLaborManage := func(next http.Handler) http.Handler {
@@ -48,6 +49,8 @@ func registerRoutes(
 	}
 	mux.Handle("/api/admin/labor-goals/upload", requireLaborManage(laborGoalsUploadHandler(db)))
 	mux.Handle("/api/admin/accounting-periods/upload", requireLaborManage(accountingPeriodsUploadHandler(db)))
+	mux.Handle("/api/admin/venues-overview", requireLaborManage(venuesOverviewHandler(db)))
+	mux.Handle("/api/admin/regions", requireLaborManage(regionsHandler(db)))
 
 	adminServer := &admin.Server{
 		DB: db, Auth: authServer, Access: access, AppURL: os.Getenv("APP_URL"),

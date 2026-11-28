@@ -1,5 +1,7 @@
 package models
 
+import "time"
+
 // QuoteDetails holds rich catering, bar, and rental details from CPQ Quote and Quote Lines.
 type QuoteDetails struct {
 	QuoteID               string   `json:"quoteId,omitempty"`
@@ -34,6 +36,9 @@ type QuoteDetails struct {
 
 // Event represents an event record across the entire platform.
 type Event struct {
+	SyncStatus                string        `json:"syncStatus,omitempty"`
+	LastSyncedAt              *time.Time    `json:"lastSyncedAt,omitempty"`
+	SalesforceModifiedAt      time.Time     `json:"-"`
 	ID                        string        `json:"id"`
 	Name                      string        `json:"name"`
 	EventDate                 string        `json:"eventDate"`              // YYYY-MM-DD
@@ -58,9 +63,9 @@ type Event struct {
 	BarLastCallDateTime       string        `json:"barLastCallDateTime,omitempty"`
 	Venue                     string        `json:"venue"`                            // Main venue/property name
 	VenueID                   string        `json:"venueId,omitempty"`                // Venue Account ID
-	VenueNumber               string        `json:"venueNumber,omitempty"`           // 3-digit finance venue number (e.g. 214, 328)
-	VenueRegion               string        `json:"venueRegion,omitempty"`           // Venue reporting region (e.g. California, Southern)
-	VenueTimezone             string        `json:"venueTimezone,omitempty"`         // IANA timezone (e.g. America/Los_Angeles)
+	VenueNumber               string        `json:"venueNumber,omitempty"`            // 3-digit finance venue number (e.g. 214, 328)
+	VenueRegion               string        `json:"venueRegion,omitempty"`            // Venue reporting region (e.g. California, Southern)
+	VenueTimezone             string        `json:"venueTimezone,omitempty"`          // IANA timezone (e.g. America/Los_Angeles)
 	VenueProperty             string        `json:"venueProperty"`                    // Property/estate name
 	VenueGM                   string        `json:"venueGM,omitempty"`                // Venue General Manager
 	CeremonyLocation          string        `json:"ceremonyLocation"`                 // Sub-place: e.g. Lakeside Arbor

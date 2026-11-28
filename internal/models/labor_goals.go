@@ -20,10 +20,11 @@ type AccountingPeriod struct {
 type LaborEfficiencyTarget struct {
 	ID          string   `json:"id"`
 	VenueID     string   `json:"venueId"`
+	VenueName   string   `json:"venueName,omitempty"`
+	Region      string   `json:"region,omitempty"`
 	VenueNumber string   `json:"venueNumber,omitempty"`
 	Year        int      `json:"year"`
 	PeriodKey   string   `json:"periodKey"`
-	Basis       string   `json:"basis"` // 'Actual', 'Forecast', 'Target'
 	FOHTarget   *float64 `json:"fohTarget"`
 	BOHTarget   *float64 `json:"bohTarget"`
 }

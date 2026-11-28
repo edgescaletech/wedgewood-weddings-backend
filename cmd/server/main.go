@@ -309,7 +309,46 @@ func eventByIDHandler(db *sql.DB, sf *salesforce.Client) http.HandlerFunc {
 		}
 
 		log.Printf("[DB MISS] Fetching single event %s from Salesforce...", id)
-		evt, err := salesforce.GetEventByID(sf, id)
+
+		var evt *salesforce.Event
+		fetchAndCache := func(conn *sql.Conn) error {
+			var err error
+			evt, err = salesforce.GetEventByIDContext(r.Context(), sf, id)
+			if err != nil {
+				return err
+			}
+			if evt != nil {
+				evt.SyncStatus = "live"
+			}
+			if conn != nil && evt != nil && allowed[evt.VenueID] {
+				if err = repositories.UpsertEvent(r.Context(), conn, evt); err != nil {
+					log.Printf("Event cache write failed for %s: %v", id, err)
+				}
+			}
+			return nil
+		}
+		var err error
+		if db != nil {
+			checkoutCtx, cancel := context.WithTimeout(r.Context(), 200*time.Millisecond)
+			conn, checkoutErr := db.Conn(checkoutCtx)
+			cancel()
+			if checkoutErr != nil {
+				err = fetchAndCache(nil)
+			} else {
+				acquired, gateErr := database.TryEventCacheGateShared(r.Context(), conn, func() error { return fetchAndCache(conn) })
+				_ = conn.Close()
+				if acquired {
+					err = gateErr
+				} else {
+					if gateErr != nil {
+						log.Printf("Cache unavailable for event %s: %v", id, gateErr)
+					}
+					err = fetchAndCache(nil)
+				}
+			}
+		} else {
+			err = fetchAndCache(nil)
+		}
 		if err != nil {
 			log.Printf("ERROR GetEventByID(%s): %v", id, err)
 			writeError(w, http.StatusNotFound, "event not found")
@@ -318,15 +357,6 @@ func eventByIDHandler(db *sql.DB, sf *salesforce.Client) http.HandlerFunc {
 		if evt == nil || !allowed[evt.VenueID] {
 			writeError(w, http.StatusNotFound, "event not found")
 			return
-		}
-
-		// Save to DB so future clicks are instant
-		if db != nil && evt != nil {
-			go func(e *salesforce.Event) {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				_ = repositories.UpsertEvent(ctx, db, e)
-			}(evt)
 		}
 
 		writeJSON(w, http.StatusOK, evt)

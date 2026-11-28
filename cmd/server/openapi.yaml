@@ -39,12 +39,13 @@ paths:
         '500': {description: Could not build the summary}
   /api/labor-goals/targets:
     get:
-      summary: List Labor targets for a venue and year
-      description: Requires labor_goals.view for the requested active venue.
+      summary: List authorized Labor targets for a year, optionally filtered by venue and region
+      description: Returns only active venues where the caller has labor_goals.view. An explicitly requested unauthorized venue is rejected.
       security: [{SessionCookie: []}]
       parameters:
-        - {name: venueId, in: query, required: true, schema: {type: string}, description: Salesforce venue ID}
-        - {name: year, in: query, schema: {type: integer, default: 2026}}
+        - {name: venueId, in: query, schema: {type: string}, description: Optional Salesforce venue ID}
+        - {name: region, in: query, schema: {type: string}, description: Optional region filter; Ungrouped selects unassigned venues}
+        - {name: year, in: query, required: true, schema: {type: integer, minimum: 1, maximum: 9999}, description: Explicit planning year}
       responses:
         '200':
           description: Labor targets
@@ -54,11 +55,12 @@ paths:
                 type: object
                 properties:
                   venueId: {type: string}
+                  region: {type: string}
                   year: {type: integer}
                   targets:
                     type: array
                     items: {$ref: '#/components/schemas/LaborEfficiencyTarget'}
-        '400': {description: venueId is required}
+        '400': {description: year is missing or invalid}
         '401': {description: Authentication required}
         '403': {description: Account inactive or venue access denied}
         '500': {description: Could not load targets}

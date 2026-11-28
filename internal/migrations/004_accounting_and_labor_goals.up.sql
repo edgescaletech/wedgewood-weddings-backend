@@ -25,7 +25,6 @@ CREATE TABLE IF NOT EXISTS labor_efficiency_targets (
     venue_number VARCHAR(20),                -- Internal Finance property code (e.g. '214', '328')
     year INTEGER NOT NULL,
     period_key VARCHAR(10) NOT NULL,         -- e.g. '2026-11'
-    basis VARCHAR(20) NOT NULL DEFAULT 'Target', -- 'Actual', 'Forecast', 'Target'
     foh_target NUMERIC(6, 2),
     boh_target NUMERIC(6, 2),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
